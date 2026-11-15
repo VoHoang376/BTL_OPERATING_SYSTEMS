@@ -1,7 +1,6 @@
-<<<<<<< Updated upstream
-# BTL_OPERATING_SYSTEMS
-=======
 # Simple Operating System (OSSIM) - BTL Hệ Điều Hành (CO2018)
+
+- **Link LaTeX Report:** [Assigment_Report](https://prism.openai.com/?u=24f79a69-50a8-4a89-ad3c-a94388d2769c&pg=1&m=main.tex&d=7)
 
 Dự án mô phỏng hệ điều hành đơn giản (**Simple Operating System**) thuộc bộ môn Khoa Học & Kỹ Thuật Máy Tính - ĐHBK TP.HCM.
 
@@ -125,4 +124,3 @@ gcc -Wall -Wextra -pthread -Iinclude -o os src/*.c
 ```bash
 ./os input/os_syscall
 ```
->>>>>>> Stashed changes
