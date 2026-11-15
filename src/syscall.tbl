@@ -1,0 +1,4 @@
+# Format: <number> <name> <entry_handler>
+0   listsyscall   __sys_listsyscall
+17  memmap        __sys_memmap
+440 xxx           __sys_xxxhandler
