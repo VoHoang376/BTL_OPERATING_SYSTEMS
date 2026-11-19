@@ -8,6 +8,8 @@
 
 struct dma_controller_t dma_engine;
 
+int dma_irq_pid = -1;
+
 /* ========================================================================= */
 /* --- THÀNH VIÊN 3: CORE DMA & BUS ADDRESSING                           --- */
 /* ========================================================================= */
@@ -116,11 +118,15 @@ static void *dma_worker(void *arg) {
             break;
         }
 
+        pthread_mutex_unlock(&dma_engine.lock);
+
         /* Mô phỏng độ trễ truyền dữ liệu trên bus phần cứng */
         usleep(30000); /* 30ms latency */
 
         /* Thực hiện sao chép dữ liệu */
         int res = dma_copy(0, dma_engine.dat_0, dma_engine.dat_1, dma_engine.dat_2);
+
+        pthread_mutex_lock(&dma_engine.lock);
 
         if (res == 0) {
             dma_engine.ch_done = 1;
@@ -135,6 +141,8 @@ static void *dma_worker(void *arg) {
             printf("[DMA Hardware] Transfer failed. Raising IRQ with error status!\n");
         }
 
+        dma_irq_pid = (int)dma_engine.dat_3; 
+        
         /* Bật tín hiệu ngắt phần cứng IRQ báo cho CPU */
         dma_engine.irq = 1;
 
@@ -198,7 +206,7 @@ int dma_check_irq(void) {
 
 /**
  * dma_isr: Interrupt Service Routine (Trình phục vụ ngắt) được CPU gọi khi phát hiện ngắt.
- * Xác nhận ngắt (Acknowledge), in thông báo xử lý và hạ đường tín hiệu ngắt (De-assert IRQ).
+ * Xác nhận ngắt (Acknowledge), in thông báo xử lý ngầm và hạ đường tín hiệu ngắt (De-assert IRQ).
  */
 void dma_isr(int cpu_id) {
     pthread_mutex_lock(&dma_engine.lock);
@@ -208,11 +216,17 @@ void dma_isr(int cpu_id) {
         return;
     }
 
+    /* Đã bắt được ngắt phần cứng từ DMA */
     printf("[CPU %d] [ISR] Handled DMA Interrupt! Transfers completed so far: %u\n",
            cpu_id, dma_engine.ch_xfer_count);
+           
+    if (dma_irq_pid != -1) {
+        printf("[ISR] DMA transfer for Process ID %d fully resolved in background.\n", dma_irq_pid);
+    }
 
     /* Acknowledge và hạ tín hiệu ngắt */
     dma_engine.irq = 0;
+    dma_irq_pid = -1;
     dma_engine.state = DMA_STATE_IDLE;
     dma_engine.ch_done = 0;
     pthread_mutex_unlock(&dma_engine.lock);

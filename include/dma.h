@@ -48,6 +48,7 @@ struct dma_controller_t {
 };
 
 extern struct dma_controller_t dma_engine;
+extern int dma_irq_pid;
 
 /* --- Thành viên 3: Core DMA & Bus Addressing Functions --- */
 int dma_init(void);

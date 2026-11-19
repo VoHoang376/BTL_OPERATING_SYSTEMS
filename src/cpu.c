@@ -78,6 +78,7 @@ int run(struct pcb_t *proc) {
                    proc->pid, (unsigned long long)src_addr, (unsigned long long)dst_addr, size);
 
             /* Khởi động DMA truyền bất đồng bộ (Non-blocking): CPU không cần copy từng byte */
+            dma_engine.dat_3 = proc->pid;
             dma_trigger_async(src_addr, dst_addr, size);
             break;
         }
