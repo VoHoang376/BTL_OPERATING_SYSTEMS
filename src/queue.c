@@ -2,37 +2,31 @@
 #include <stdlib.h>
 #include "queue.h"
 
-void init_queue(struct queue_t *q) {
-    if (!q) return;
-    q->size = 0;
-    q->slot = 0;
-    for (int i = 0; i < MAX_QUEUE_SIZE; i++) {
-        q->proc[i] = NULL;
-    }
+int empty(struct queue_t *q)
+{
+        if (q == NULL)
+                return 1;
+        return (q->size == 0);
 }
 
-void enqueue(struct queue_t *q, struct pcb_t *proc) {
-    /* TODO: TV1 - Implement enqueue operation into priority queue */
-    if (!q || !proc) return;
-    if (q->size >= MAX_QUEUE_SIZE) {
-        fprintf(stderr, "[Queue] Warning: Queue is full, cannot enqueue PID %u\n", proc->pid);
-        return;
-    }
-    q->proc[q->size++] = proc;
+void enqueue(struct queue_t *q, struct pcb_t *proc)
+{
+        /* TODO: put a new process to queue [q] */
+;
 }
 
-struct pcb_t *dequeue(struct queue_t *q) {
-    /* TODO: TV1 - Implement dequeue operation to fetch the next in-turn process */
-    if (!q || q->size == 0) return NULL;
-    struct pcb_t *proc = q->proc[0];
-    for (int i = 0; i < q->size - 1; i++) {
-        q->proc[i] = q->proc[i + 1];
-    }
-    q->proc[--q->size] = NULL;
-    return proc;
+struct pcb_t *dequeue(struct queue_t *q)
+{
+        /* TODO: return a pcb whose prioprity is the highest
+         * in the queue [q] and remember to remove it from q
+         * */
+
+		return NULL;
 }
 
-int empty(struct queue_t *q) {
-    if (!q) return 1;
-    return (q->size == 0);
+struct pcb_t *purgequeue(struct queue_t *q, struct pcb_t *proc)
+{
+        /* TODO: remove a specific item from queue
+         * */
+        return NULL;
 }

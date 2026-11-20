@@ -1,133 +1,135 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <pthread.h>
+/*
+ * Copyright (C) 2026 pdnguyen of HCMC University of Technology VNU-HCM
+ *
+ * demacOprx release
+ * Source Code License Grant: The authors hereby grant to Licensee
+ * personal permission to use and modify the Licensed Source Code
+ * for the sole purpose of studying while attending the course CO2018.
+ *
+ * CPU and co-processor module
+ */
 #include "cpu.h"
-#include "sched.h"
-#include "dma.h"
+#include "mem.h"
+#include "mm.h"
 #include "syscall.h"
 #include "libmem.h"
-#include "libstd.h"
 
-void check_and_handle_interrupts(struct cpu_t *cpu) {
-    /* TV4 - Check and service hardware interrupt from DMA co-processor */
-    if (dma_check_irq()) {
-        dma_isr(cpu->id);
-    }
+int calc(struct pcb_t *proc)
+{
+	return ((unsigned long)proc & 0UL);
 }
 
-int run(struct pcb_t *proc) {
-    if (!proc || !proc->code) return -1;
-    if (proc->pc >= (uint32_t)proc->code->size) return 0;
-
-    struct instruction_t *ins = &proc->code->text[proc->pc];
-    printf("[CPU] PID %u executing instruction #%u (Opcode %d)\n", proc->pid, proc->pc, ins->opcode);
-
-    switch (ins->opcode) {
-        case CALC:
-            /* Calculation takes 1 cycle */
-            break;
-        case ALLOC:
-            libmem_alloc(proc, (uint32_t)ins->arg0, (uint32_t)ins->arg1);
-            break;
-        case KMALLOC:
-            /* Kernel continuous physical allocation */
-            printf("[CPU] KMALLOC %lu bytes into reg %lu (Kernel Space)\n", 
-                   (unsigned long)ins->arg0, (unsigned long)ins->arg1);
-            proc->regs[ins->arg1] = 0x80000000; /* Simulated Kernel space pointer */
-            break;
-        case FREE:
-            libmem_free(proc, (uint32_t)ins->arg0);
-            break;
-        case READ:
-            libmem_read(proc, (uint32_t)ins->arg0, (uint32_t)ins->arg1, (uint32_t)ins->arg2);
-            break;
-        case WRITE:
-            libmem_write(proc, (uint32_t)ins->arg0, (uint32_t)ins->arg1, (uint32_t)ins->arg2);
-            break;
-        case COPY_FROM_USER: {
-            uint8_t kbuf[256] = {0};
-            uint32_t sz = ins->arg3 > 256 ? 256 : (uint32_t)ins->arg3;
-            copy_from_user(proc->pid, kbuf, (addr_t)(ins->arg0 + ins->arg2), sz);
-            break;
-        }
-        case COPY_TO_USER: {
-            uint8_t kbuf[256] = {0xAA, 0xBB, 0xCC, 0xDD};
-            uint32_t sz = ins->arg3 > 256 ? 256 : (uint32_t)ins->arg3;
-            copy_to_user(proc->pid, (addr_t)(ins->arg1 + ins->arg2), kbuf, sz);
-            break;
-        }
-        case DMA_MEMCPY: {
-            /* TV3 & TV4: Co-processor DMA memory transfer integration */
-            uint64_t src_base = ins->arg0;
-            uint64_t dst_base = ins->arg1;
-
-            /* Nếu tham số chỉ định là thanh ghi (0..9) và thanh ghi có giá trị */
-            if (src_base < 10 && proc->regs[src_base] != 0) {
-                src_base = proc->regs[src_base];
-            }
-            if (dst_base < 10 && proc->regs[dst_base] != 0) {
-                dst_base = proc->regs[dst_base];
-            }
-
-            uint64_t src_addr = src_base + ins->arg2; /* + offset */
-            uint64_t dst_addr = dst_base + ins->arg2; /* + offset */
-            uint32_t size = (uint32_t)ins->arg3;
-
-            printf("[CPU %u] DMA_MEMCPY instruction: src=0x%llx, dst=0x%llx, size=%u\n",
-                   proc->pid, (unsigned long long)src_addr, (unsigned long long)dst_addr, size);
-
-            /* Khởi động DMA truyền bất đồng bộ (Non-blocking): CPU không cần copy từng byte */
-            dma_engine.dat_3 = proc->pid;
-            dma_trigger_async(src_addr, dst_addr, size);
-            break;
-        }
-        case SYSCALL: {
-            struct sc_regs regs = { (uint32_t)ins->arg1, 0, 0, 0 };
-            printf("[CPU] SYSCALL %lu\n", (unsigned long)ins->arg0);
-            syscall((int)ins->arg0, proc, &regs);
-            break;
-        }
-        default:
-            break;
-    }
-
-    proc->pc++;
-    return (proc->pc < (uint32_t)proc->code->size) ? 1 : 0;
+int alloc(struct pcb_t *proc, uint32_t size, uint32_t reg_index)
+{
+	addr_t addr = alloc_mem(size, proc);
+	if (addr == 0)
+	{
+		return 1;
+	}
+	else
+	{
+		proc->regs[reg_index] = addr;
+		return 0;
+	}
 }
 
-void *cpu_routine(void *arg) {
-    struct cpu_t *cpu = (struct cpu_t *)arg;
-    while (cpu->running) {
-        check_and_handle_interrupts(cpu);
+int free_data(struct pcb_t *proc, uint32_t reg_index)
+{
+	return free_mem(proc->regs[reg_index], proc);
+}
 
-        struct pcb_t *proc = get_proc();
-        if (proc == NULL) {
-            usleep(50000); /* 50ms idle if no processes */
-            continue;
-        }
+int read(
+	struct pcb_t *proc, // Process executing the instruction
+	uint32_t source,	// Index of source register
+	uint32_t offset,	// Source address = [source] + [offset]
+	uint32_t destination)
+{ // Index of destination register
 
-        cpu->current_proc = proc;
-        int remaining_slice = cpu->time_slice;
-        while (remaining_slice > 0) {
-            check_and_handle_interrupts(cpu);
-            int status = run(proc);
-            remaining_slice--;
-            if (status == 0) {
-                /* Process has completed all instructions */
-                printf("[CPU %d] PID %u finished execution.\n", cpu->id, proc->pid);
-                break;
-            }
-        }
-        check_and_handle_interrupts(cpu);
+	BYTE data;
+	if (read_mem(proc->regs[source] + offset, proc, &data))
+	{
+		proc->regs[destination] = data;
+		return 0;
+	}
+	else
+	{
+		return 1;
+	}
+}
 
-        if (proc->pc < (uint32_t)proc->code->size) {
-            /* Still has instructions left: requeue back to scheduler */
-            put_proc(proc);
-        } else {
-            /* TODO: Cleanup finished process resources */
-        }
-        cpu->current_proc = NULL;
-    }
-    return NULL;
+int write(
+	struct pcb_t *proc,	// Process executing the instruction
+	BYTE data,		// Data to be wrttien into memory
+	uint32_t destination, // Index of destination register
+	uint32_t offset)
+{ // Destination address =
+	// [destination] + [offset]
+	return write_mem(proc->regs[destination] + offset, proc, data);
+}
+
+int run(struct pcb_t *proc)
+{
+	/* Check if Program Counter point to the proper instruction */
+	if (proc->pc >= proc->code->size)
+	{
+		return 1;
+	}
+
+	struct inst_t ins = proc->code->text[proc->pc];
+	proc->pc++;
+	int stat = 1;
+switch (ins.opcode)
+	{
+	case CALC:
+		stat = calc(proc);
+		break;
+	case ALLOC:
+#ifdef MM_PAGING
+		stat = liballoc(proc, ins.arg_0, ins.arg_1);
+#else
+		stat = alloc(proc, ins.arg_0, ins.arg_1);
+#endif
+		break;
+#ifdef MM_PAGING		
+	case KMALLOC:
+		stat = libkmem_malloc(proc, ins.arg_0, ins.arg_1);
+		break;
+	case COPY_FROM_USER:
+		stat = libkmem_copy_from_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		break;
+	case COPY_TO_USER:
+		stat = libkmem_copy_to_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		break;
+	case DMA_MEMCPY:
+		stat = libmem_dma_memcpy(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		break;
+#endif
+	case FREE:
+#ifdef MM_PAGING
+		stat = libfree(proc, ins.arg_0);
+#else
+		stat = free_data(proc, ins.arg_0);
+#endif
+		break;
+	case READ:
+#ifdef MM_PAGING
+		stat = libread(proc, ins.arg_0, ins.arg_1, (uint32_t*) &ins.arg_2);
+#else
+		stat = read(proc, ins.arg_0, ins.arg_1, ins.arg_2);
+#endif
+		break;
+	case WRITE:
+#ifdef MM_PAGING
+		stat = libwrite(proc, ins.arg_0, ins.arg_1, ins.arg_2);
+#else
+		stat = write(proc, ins.arg_0, ins.arg_1, ins.arg_2);
+#endif
+		break;
+	case SYSCALL:
+		stat = libsyscall(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		break;
+	default:
+		stat = 1;
+	}
+	return stat;
 }

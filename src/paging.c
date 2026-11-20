@@ -1,9 +1,18 @@
-#include <stdio.h>
-#include "common.h"
-#include "mm.h"
 
-/* Legacy paging verification stub */
-int test_paging_framework(void) {
-    printf("[Paging Test] Verification framework stub.\n");
-    return 0;
+#include "mem.h"
+#include "cpu.h"
+#include "loader.h"
+#include <stdio.h>
+
+int main() {
+	struct pcb_t * ld = load("input/p0");
+	struct pcb_t * proc = load("input/p0");
+	unsigned int i;
+	for (i = 0; i < proc->code->size; i++) {
+		run(proc);
+		run(ld);
+	}
+	dump();
+	return 0;
 }
+

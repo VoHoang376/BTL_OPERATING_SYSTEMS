@@ -1,33 +1,43 @@
-#ifndef SYSCALL_H
-#define SYSCALL_H
+/*
+ * Copyright (C) 2026 pdnguyen of HCMC University of Technology VNU-HCM
+ */
 
-#include <stdint.h>
+/* Caitoa release
+ * Source Code License Grant: The authors hereby grant to Licensee
+ * personal permission to use and modify the Licensed Source Code
+ * for the sole purpose of studying while attending the course CO2018.
+ */
+
 #include "common.h"
 
-/* System call register structure */
+
 struct sc_regs {
-    uint32_t a0;
-    uint32_t a1;
-    uint32_t a2;
-    uint32_t a3;
+        arg_t a1;
+        arg_t a2;
+        arg_t a3;
+        arg_t a4;
+        arg_t a5;
+        arg_t a6;
+
+        /*
+         * orig_ax is used on entry for:
+         * - the syscall number (syscall, sysenter, int80)
+         * - error_code stored by the CPU on traps and exceptions
+         * - the interrupt number for device interrupts
+         */
+        uint32_t orig_ax;
+
+        int32_t flags;
 };
 
-/* System call numbers */
-#define SYS_LISTSYSCALL 0
-#define SYS_MEMMAP      17
-#define SYS_XXX         440
 
-/* Sub-operations for memmap syscall */
-#define SYSMEM_MAP_OP   1
-#define SYSMEM_INC_OP   2
-#define SYSMEM_SWP_OP   3
-#define SYSMEM_IO_READ  4
-#define SYSMEM_IO_WRITE 5
+/* This is used purely for kernel trace the table of system call */
+extern const char* sys_call_table[];
+extern const int syscall_table_size;
 
-/* System call entry point and handlers */
-int syscall(int sys_num, struct pcb_t *caller, struct sc_regs *regs);
-int __sys_listsyscall(struct pcb_t *caller, struct sc_regs *regs);
-int __sys_memmap(struct pcb_t *caller, struct sc_regs *regs);
-int __sys_xxxhandler(struct pcb_t *caller, struct sc_regs *regs);
+/* libsyscall interface */
+int __mm_swap_page(struct pcb_t *, addr_t , addr_t);
+int libsyscall(struct pcb_t*, uint32_t, arg_t, arg_t, arg_t);
+int _syscall(struct krnl_t*, uint32_t, uint32_t, struct sc_regs*);
+int __sys_ni_syscall(struct krnl_t*, struct sc_regs*);
 
-#endif /* SYSCALL_H */

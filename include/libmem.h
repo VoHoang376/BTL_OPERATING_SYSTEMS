@@ -1,13 +1,27 @@
-#ifndef LIBMEM_H
-#define LIBMEM_H
+/*
+ * Copyright (C) 2025 pdnguyen of HCMC University of Technology VNU-HCM
+ */
 
-#include <stdint.h>
+/* Sierra release
+ * Source Code License Grant: The authors hereby grant to Licensee
+ * personal permission to use and modify the Licensed Source Code
+ * for the sole purpose of studying while attending the course CO2018.
+ */
+
 #include "common.h"
 
-/* Userspace memory API */
-int libmem_alloc(struct pcb_t *proc, uint32_t size, uint32_t reg_idx);
-int libmem_free(struct pcb_t *proc, uint32_t reg_idx);
-int libmem_read(struct pcb_t *proc, uint32_t src_reg, uint32_t offset, uint32_t dst_reg);
-int libmem_write(struct pcb_t *proc, uint32_t data_reg, uint32_t dst_reg, uint32_t offset);
+#define SYSMEM_MAP_OP 1
+#define SYSMEM_INC_OP 2
+#define SYSMEM_SWP_OP 3
+#define SYSMEM_IO_READ 4
+#define SYSMEM_IO_WRITE 5
 
-#endif /* LIBMEM_H */
+extern struct vm_area_struct *get_vma_by_num(struct mm_struct *mm, int vmaid);
+int liballoc(struct pcb_t *, addr_t, uint32_t);
+int libfree(struct pcb_t *, uint32_t);
+int libread(struct pcb_t*, uint32_t, addr_t, uint32_t*);
+int libwrite(struct pcb_t*, BYTE, uint32_t, addr_t);
+int libkmem_malloc(struct pcb_t*, uint32_t, uint32_t);
+int libkmem_copy_from_user(struct pcb_t*, uint32_t, uint32_t, uint32_t, uint32_t);
+int libkmem_copy_to_user(struct pcb_t*, uint32_t, uint32_t, uint32_t, uint32_t);
+int libmem_dma_memcpy(struct pcb_t*, uint32_t, uint32_t, uint32_t, uint32_t);

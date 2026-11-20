@@ -1,15 +1,34 @@
-#ifndef SCHED_H
-#define SCHED_H
+#ifndef QUEUE_H
+#define QUEUE_H
 
 #include "common.h"
-#include "queue.h"
 
-/* Scheduler interface */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifndef MLQ_SCHED
+#define MLQ_SCHED
+#endif
+
+#define MAX_PRIO 140
+
+int queue_empty(void);
+
 void init_scheduler(void);
-struct pcb_t *get_proc(void);
-void put_proc(struct pcb_t *proc);
-void add_mlq(struct pcb_t *proc);
-void register_pcb(struct pcb_t *proc);
-struct pcb_t *get_pcb_by_pid(uint32_t pid);
+void finish_scheduler(void);
 
-#endif /* SCHED_H */
+/* Get the next process from ready queue */
+struct pcb_t * get_proc(void);
+
+/* Put a process back to run queue */
+void put_proc(struct pcb_t * proc);
+
+/* Add a new process to ready queue */
+void add_proc(struct pcb_t * proc);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

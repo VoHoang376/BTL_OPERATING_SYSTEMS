@@ -3,17 +3,17 @@
 
 #include "common.h"
 
-struct cpu_t {
-    int id;
-    int time_slice;
-    struct pcb_t *current_proc;
-    pthread_t thread;
-    bool running;
-};
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-/* CPU interface */
-void *cpu_routine(void *arg);
-int run(struct pcb_t *proc);
-void check_and_handle_interrupts(struct cpu_t *cpu);
+/* Execute an instruction of a process. Return 0
+ * if the instruction is executed successfully.
+ * Otherwise, return 1. */
+int run(struct pcb_t * proc);
 
-#endif /* CPU_H */
+#ifdef __cplusplus
+}
+#endif
+
+#endif

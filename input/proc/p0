@@ -1,5 +1,0 @@
-0 4
-calc
-alloc 128 1
-write 42 1 0
-read 1 0 2

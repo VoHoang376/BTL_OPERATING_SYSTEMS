@@ -1,26 +1,33 @@
-#ifndef OS_CFG_H
-#define OS_CFG_H
+/*
+ * Copyright (C) 2026 pdnguyen of HCMC University of Technology VNU-HCM
+ */
 
-/* Configuration constants for Simple OS simulation */
+/* Caitoa release
+ * Source Code License Grant: The authors hereby grant to Licensee
+ * personal permission to use and modify the Licensed Source Code
+ * for the sole purpose of studying while attending the course CO2018.
+ */
 
-/* Scheduler Configuration */
+#ifndef OSCFG_H
+#define OSCFG_H
+
 #define MLQ_SCHED 1
 #define MAX_PRIO 140
 
-/* Memory Management Configuration */
-#define MM_PAGING 1
-#define MM_FIXED_MEMSZ 1
+#define MM_PAGING
+//#define MM_FIXED_MEMSZ
+//#define VMDBG 1
+//#define MMDBG 1
+#define IODUMP 1
+#define PAGETBL_DUMP 1
+
+/* 
+ * @bksysnet:
+ *    The address mode must be explicitly define in MM64 or no-MM64
+ *    by commenting one of these following lines and uncommenting the other
+ *      
+ */
 #define MM64 1
+//#undef MM64
 
-/* Memory limits and parameters */
-#define PAGING_MAX_SYMTBL_SZ 30
-#define PAGING_MAX_MMSWP 4
-#define PAGING_PAGESZ 4096       /* 4KB page size for 64-bit multi-level paging */
-#define PAGING_MAX_PGN 0x100000  /* Maximum virtual page count */
-
-/* CPU & System limits */
-#define MAX_CPU 4
-#define MAX_PROCESS 20
-#define DEFAULT_TIME_SLICE 2
-
-#endif /* OS_CFG_H */
+#endif

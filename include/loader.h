@@ -3,8 +3,14 @@
 
 #include "common.h"
 
-/* Loader interface: reads program description file and constructs a PCB */
-struct pcb_t *load(const char *path);
-void *loader_routine(void *arg);
+#ifdef __cplusplus
+extern "C" {
+#endif
 
-#endif /* LOADER_H */
+struct pcb_t * load(const char * path);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
