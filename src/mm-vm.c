@@ -115,7 +115,8 @@ int inc_vma_limit(struct pcb_t *caller, int vmaid, addr_t inc_sz)
     return -1;
 
   addr_t new_end = old_end + pages * PAGING64_PAGESZ;
-  if (validate_overlap_vm_area(caller, vmaid, old_end, new_end) != 0)
+  if (new_end - vma->vm_start > PAGING64_HEAP_VMA_SPAN ||
+      validate_overlap_vm_area(caller, vmaid, old_end, new_end) != 0)
     return -1;
 
   struct vm_rg_struct *region = init_vm_rg(old_end, new_end);

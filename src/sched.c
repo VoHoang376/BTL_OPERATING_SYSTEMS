@@ -40,6 +40,20 @@ struct pcb_t *find_proc_by_pid_safe(uint32_t pid)
 }
 #endif
 
+void remove_running_proc(struct pcb_t *proc)
+{
+	pthread_mutex_lock(&queue_lock);
+	int kept = 0;
+	for (int i = 0; i < running_list.size; ++i) {
+		if (running_list.proc[i] != proc)
+			running_list.proc[kept++] = running_list.proc[i];
+	}
+	for (int i = kept; i < running_list.size; ++i)
+		running_list.proc[i] = NULL;
+	running_list.size = kept;
+	pthread_mutex_unlock(&queue_lock);
+}
+
 int queue_empty(void) {
 #ifdef MLQ_SCHED
 	unsigned long prio;

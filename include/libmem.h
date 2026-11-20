@@ -15,6 +15,10 @@
 #define SYSMEM_SWP_OP 3
 #define SYSMEM_IO_READ 4
 #define SYSMEM_IO_WRITE 5
+#define SYSMEM_KMALLOC_OP 6
+#define SYSMEM_COPY_FROM_USER 7
+#define SYSMEM_COPY_TO_USER 8
+#define SYSMEM_KFREE_OP 9
 
 extern struct vm_area_struct *get_vma_by_num(struct mm_struct *mm, int vmaid);
 int liballoc(struct pcb_t *, addr_t, uint32_t);

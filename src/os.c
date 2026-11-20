@@ -22,6 +22,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 
 #include "sysbus.h"
@@ -33,16 +35,13 @@ static int done = 0;
 static struct krnl_t os;
 
 #ifdef MM_PAGING
-static unsigned long memramsz;
-static unsigned long memswpsz[PAGING_MAX_MMSWP];
+static uint64_t memramsz;
+static uint64_t memswpsz[PAGING_MAX_MMSWP];
 
 struct mmpaging_ld_args {
-	/* A dispatched argument struct to compact many-fields passing to loader */
-	int vmemsz;
 	struct memphy_struct *mram;
 	struct memphy_struct **mswp;
 	struct memphy_struct *active_mswp;
-	int active_mswp_id;
 	struct timer_id_t  *timer_id;
 };
 #endif
@@ -78,9 +77,22 @@ static void * cpu_routine(void * args) {
                            continue; /* First load failed. skip dummy load */
                         }
 		}else if (proc->pc == proc->code->size) {
-			/* The porcess has finish it job */
 			printf("\tCPU %d: Processed %2d has finished\n",
 				id ,proc->pid);
+			remove_running_proc(proc);
+#ifdef MM_PAGING
+#ifdef MM64
+			print_mmu_stats(proc);
+#endif
+			if (free_pcb_memph(proc) != 0) {
+				fprintf(stderr, "Cannot release memory for PID %u\n", proc->pid);
+				exit(EXIT_FAILURE);
+			}
+			free(proc->mm);
+#endif
+			free(proc->code->text);
+			free(proc->code);
+			free(proc->page_table);
 			free(proc);
 			proc = get_proc();
 			time_left = 0;
@@ -137,58 +149,62 @@ static void * co_processor(void *arg) {
 }
 
 static void * ld_routine(void * args) {
+  printf("ld_routine\n");
 #ifdef MM_PAGING
-	struct memphy_struct* mram = ((struct mmpaging_ld_args *)args)->mram;
-	struct memphy_struct** mswp = ((struct mmpaging_ld_args *)args)->mswp;
-	struct memphy_struct* active_mswp = ((struct mmpaging_ld_args *)args)->active_mswp;
-	struct timer_id_t * timer_id = ((struct mmpaging_ld_args *)args)->timer_id;
-#else
-	struct timer_id_t * timer_id = (struct timer_id_t*)args;
-#endif
-	int i = 0;
-  /* TODO init kernel page table directory */
+  const struct mmpaging_ld_args *paging = args;
+  struct timer_id_t *timer_id = paging->timer_id;
+  os.mram = paging->mram;
+  os.mswp = paging->mswp;
+  os.active_mswp = paging->active_mswp;
+  os.mm = malloc(sizeof(*os.mm));
 #ifdef MM64
-	os.krnl_pgd = (addr_t*)malloc(PAGING64_MAX_PGN * sizeof(addr_t));
-	os.krnl_p4d = NULL;
-	os.krnl_pud = NULL;
-	os.krnl_pmd = NULL;
-	os.krnl_pt = NULL;
+  if (init_mm(os.mm, NULL) != 0)
+  {
+    fprintf(stderr, "Cannot initialize kernel memory\n");
+    exit(EXIT_FAILURE);
+  }
+  os.krnl_pgd = os.mm->pgd;
 #else
-	os.krnl_pgd = (uint32_t*)malloc(PAGING_MAX_PGN * sizeof(uint32_t));
+  os.krnl_pgd = malloc(PAGING_MAX_PGN * sizeof(*os.krnl_pgd));
+  init_mm(os.mm, NULL);
 #endif
-	i=0;
-	printf("ld_routine\n");
-	os.mram = mram;
-	os.mswp = mswp;
-	os.active_mswp = active_mswp;
-	os.mm = (struct mm_struct*)malloc(sizeof(struct mm_struct));
-	init_mm(os.mm, NULL);
-	while (i < num_processes) {
-		struct pcb_t * proc = load(ld_processes.path[i]);
-		proc->krnl = &os;
+#else
+  struct timer_id_t *timer_id = args;
+#endif
+
+  for (int i = 0; i < num_processes; i++)
+  {
+    struct pcb_t *proc = load(ld_processes.path[i]);
+    proc->krnl = &os;
 
 #ifdef MLQ_SCHED
-	proc->prio = ld_processes.prio[i];
+    proc->prio = ld_processes.prio[i];
 #endif
-	while (current_time() < ld_processes.start_time[i]) {
-		next_slot(timer_id);
-	}
+
+    while (current_time() < ld_processes.start_time[i])
+      next_slot(timer_id);
+
 #ifdef MM_PAGING
-	proc->mm = (struct mm_struct*)malloc(sizeof(struct mm_struct));
-	init_mm(proc->mm, proc);
+    proc->mm = malloc(sizeof(*proc->mm));
+    if (init_mm(proc->mm, proc) != 0)
+    {
+      fprintf(stderr, "Cannot initialize memory for PID %u\n", proc->pid);
+      exit(EXIT_FAILURE);
+    }
 #endif
-		printf("\tLoaded a process at %s, PID: %d PRIO: %ld\n",
-			ld_processes.path[i], proc->pid, ld_processes.prio[i]);
-		add_proc(proc);
-		free(ld_processes.path[i]);
-		i++;
-		next_slot(timer_id);
-	}
-	free(ld_processes.path);
-	free(ld_processes.start_time);
-	done = 1;
-	detach_event(timer_id);
-	pthread_exit(NULL);
+
+    printf("\tLoaded a process at %s, PID: %u PRIO: %u\n",
+           ld_processes.path[i], proc->pid, proc->prio);
+    add_proc(proc);
+    free(ld_processes.path[i]);
+    next_slot(timer_id);
+  }
+
+  free(ld_processes.path);
+  free(ld_processes.start_time);
+  done = 1;
+  detach_event(timer_id);
+  pthread_exit(NULL);
 }
 
 static void read_config(const char * path) {
@@ -209,7 +225,12 @@ static void read_config(const char * path) {
 	 * for legacy info 
          *  [time slice] [N = Number of CPU] [M = Number of Processes to be run]
          */
-        memramsz  =  0x100000000;
+#ifdef MM64
+	/* The PTE can address 8192 physical frames. */
+	memramsz = ((uint64_t)PAGING_PTE_FPN_MASK + 1) * PAGING64_PAGESZ;
+#else
+	memramsz = PAGING_MEMRAMSZ;
+#endif
         memswpsz[0] = 0x1000000;
 	for(sit = 1; sit < PAGING_MAX_MMSWP; sit++)
 		memswpsz[sit] = 0;
@@ -218,9 +239,18 @@ static void read_config(const char * path) {
 	 * Format: (size=0 result non-used memswap, must have RAM and at least 1 SWAP)
 	 *        MEM_RAM_SZ MEM_SWP0_SZ MEM_SWP1_SZ MEM_SWP2_SZ MEM_SWP3_SZ
 	*/
-	fscanf(file, FORMAT_ARG "\n", &memramsz);
-	for(sit = 0; sit < PAGING_MAX_MMSWP; sit++)
-		fscanf(file, FORMAT_ARG, &(memswpsz[sit])); 
+	if (fscanf(file, "%" SCNu64, &memramsz) != 1 || memramsz == 0 ||
+	    memramsz > INT_MAX) {
+		fprintf(stderr, "Invalid RAM size in %s (expected 1 to %d bytes)\n", path, INT_MAX);
+		exit(EXIT_FAILURE);
+	}
+	for (sit = 0; sit < PAGING_MAX_MMSWP; sit++) {
+		if (fscanf(file, "%" SCNu64, &memswpsz[sit]) != 1 || memswpsz[sit] > INT_MAX) {
+			fprintf(stderr, "Invalid SWAP[%d] size in %s (expected 0 to %d bytes)\n",
+			        sit, path, INT_MAX);
+			exit(EXIT_FAILURE);
+		}
+	}
 
        fscanf(file, "\n"); /* Final character */
 #endif
@@ -270,7 +300,6 @@ int main(int argc, char * argv[]) {
 		args[i].id = i;
 	}
 	struct timer_id_t * ld_event = attach_event();
-	start_timer();
 
 #ifdef MM_PAGING
 	/* Init all MEMPHY include 1 MEMRAM and n of MEMSWP */
@@ -278,33 +307,40 @@ int main(int argc, char * argv[]) {
 
 	struct memphy_struct mram;
 	struct memphy_struct mswp[PAGING_MAX_MMSWP];
+	struct memphy_struct *swap_devices[PAGING_MAX_MMSWP];
 
 	/* Create MEM RAM */
-	init_memphy(&mram, memramsz, rdmflag);
+	if (init_memphy(&mram, memramsz, rdmflag) != 0) {
+		fprintf(stderr, "Cannot initialize RAM (%" PRIu64 " bytes)\n", memramsz);
+		return EXIT_FAILURE;
+	}
 
         /* Create all MEM SWAP */ 
 	int sit;
-	for(sit = 0; sit < PAGING_MAX_MMSWP; sit++)
-	       init_memphy(&mswp[sit], memswpsz[sit], rdmflag);
+	for (sit = 0; sit < PAGING_MAX_MMSWP; sit++) {
+		if (init_memphy(&mswp[sit], memswpsz[sit], rdmflag) != 0) {
+			fprintf(stderr, "Cannot initialize SWAP[%d] (%" PRIu64 " bytes)\n",
+			        sit, memswpsz[sit]);
+			return EXIT_FAILURE;
+		}
+		swap_devices[sit] = &mswp[sit];
+	}
 
-	/* In Paging mode, it needs passing the system mem to each PCB through loader*/
-	struct mmpaging_ld_args *mm_ld_args = (struct mmpaging_ld_args*)malloc(sizeof(struct mmpaging_ld_args));
-
-	mm_ld_args->timer_id = ld_event;
-	mm_ld_args->mram = (struct memphy_struct *) &mram;
-	mm_ld_args->mswp = (struct memphy_struct**) &mswp;
-	mm_ld_args->active_mswp = (struct memphy_struct *) &mswp[0];
-        mm_ld_args->active_mswp_id = 0;
-
-
+	struct mmpaging_ld_args mm_ld_args = {
+		.mram = &mram,
+		.mswp = swap_devices,
+		.active_mswp = &mswp[0],
+		.timer_id = ld_event,
+	};
 #endif
 
 	/* Init scheduler */
+	start_timer();
 	init_scheduler();
 
 	/* Run CPU and loader */
 #ifdef MM_PAGING
-	pthread_create(&ld, NULL, ld_routine, (void*)mm_ld_args);
+	pthread_create(&ld, NULL, ld_routine, &mm_ld_args);
 #else
 	pthread_create(&ld, NULL, ld_routine, (void*)ld_event);
 #endif

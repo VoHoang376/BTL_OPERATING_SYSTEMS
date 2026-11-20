@@ -1,4 +1,5 @@
 #ifndef MM_H
+#define MM_H
 
 #include "common.h"
 #include "bitops.h"
@@ -145,6 +146,7 @@ int __free(struct pcb_t *caller, int vmaid, int rgid);
 int __read(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BYTE *data);
 int __write(struct pcb_t *caller, int vmaid, int rgid, addr_t offset, BYTE value);
 int init_mm(struct mm_struct *mm, struct pcb_t *caller);
+int free_pcb_memph(struct pcb_t *caller);
 
 /* VM prototypes */
 int pgalloc(struct pcb_t *proc, uint32_t size, uint32_t reg_index);

@@ -2,11 +2,31 @@
 #define MM64_H
 
 #include "mm.h"
+#include <stddef.h>
+
 #define MM64_BITS_PER_LONG 64
 
-#define PAGING64_CPU_BUS_WIDTH 57 /* 57 bit bus - MAX SPACE 4MB */
+#define PAGING64_CPU_BUS_WIDTH 57
 #define PAGING64_PAGESZ  4096      /* 4KB or 12-bits PAGE NUMBER */
 #define PAGING64_TABLE_ENTRIES 512
+#define PAGING64_LEVELS 5
+
+#define PAGING64_HEAP_VMA_SPAN BIT_ULL(30)
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+size_t mmu_page_table_bytes(const struct mm_struct *mm);
+void print_mmu_stats(const struct pcb_t *proc);
+#ifdef __cplusplus
+}
+#endif
+
+enum heap_vma_id {
+  HEAP_VMA_SMALL,
+  HEAP_VMA_MEDIUM,
+  HEAP_VMA_LARGE
+};
 
 #define GENMASK64(h, l) \
 	(((~0ULL) << (l)) & (~0ULL >> (MM64_BITS_PER_LONG  - (h) - 1)))
