@@ -20,7 +20,11 @@
 #include <string.h>
 #include <pthread.h>
 
-pthread_mutex_t mmvm_lock = PTHREAD_MUTEX_INITIALIZER;
+/* mmvm_lock protects virtual mappings and regions. kmm_lock protects RAM
+ * frame lists and transfers through the memory syscalls. Take mmvm_lock first
+ * whenever an operation needs both. */
+static pthread_mutex_t mmvm_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t kmm_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int valid_register(const struct pcb_t *proc, arg_t index)
 {
@@ -102,10 +106,12 @@ void print_mmu_stats(const struct pcb_t *proc)
       __atomic_load_n(&user_mm->pte_lookup_reads, __ATOMIC_RELAXED);
   uint64_t kernel_reads =
       __atomic_load_n(&kernel_mm->pte_lookup_reads, __ATOMIC_RELAXED);
+  pthread_mutex_lock(&kmm_lock);
   uint64_t ram_reads =
       __atomic_load_n(&ram->data_reads, __ATOMIC_RELAXED);
   uint64_t ram_writes =
       __atomic_load_n(&ram->data_writes, __ATOMIC_RELAXED);
+  pthread_mutex_unlock(&kmm_lock);
 
   pthread_mutex_unlock(&mmvm_lock);
 
@@ -481,7 +487,7 @@ int libwrite(
  *@size: memory size
  */
 
-int libkmem_malloc(struct pcb_t *caller, uint32_t size, uint32_t reg_index)
+int libkmem_malloc(struct pcb_t * caller, uint32_t size, uint32_t reg_index)
 {
 	if (!valid_register(caller, reg_index))
 		return -1;
@@ -503,6 +509,51 @@ static struct framephy_struct **find_used_frame(struct memphy_struct *ram,
 	while (*link != NULL && ((*link)->owner != owner || (*link)->fpn != fpn))
 		link = &(*link)->fp_next;
 	return link;
+}
+
+/* Called by __sys_memmap after resolving the caller's PID. */
+int __sys_umem(struct pcb_t *caller, int memop, struct sc_regs *regs)
+{
+  if (memop == SYSMEM_INC_OP)
+  {
+    if (regs->a2 > (arg_t)INT32_MAX)
+      return -1;
+
+    pthread_mutex_lock(&mmvm_lock);
+    pthread_mutex_lock(&kmm_lock);
+    int result = inc_vma_limit(caller, (int)regs->a2, regs->a3);
+    pthread_mutex_unlock(&kmm_lock);
+    pthread_mutex_unlock(&mmvm_lock);
+    return result;
+  }
+
+  struct memphy_struct *ram = caller->krnl->mram;
+  addr_t addr = regs->a2;
+  if (caller->mm == NULL || ram == NULL || ram->storage == NULL ||
+      ram->maxsz <= 0 || addr >= (addr_t)ram->maxsz)
+    return -1;
+
+#ifdef MM64
+  addr_t fpn = addr / PAGING64_PAGESZ;
+#else
+  addr_t fpn = addr / PAGING_PAGESZ;
+#endif
+  int result = -1;
+  pthread_mutex_lock(&kmm_lock);
+  if (*find_used_frame(ram, caller->mm, fpn) != NULL)
+  {
+    if (memop == SYSMEM_IO_WRITE)
+      result = MEMPHY_write(ram, addr, (BYTE)regs->a3);
+    else
+    {
+      BYTE value;
+      result = MEMPHY_read(ram, addr, &value);
+      if (result == 0)
+        regs->a3 = (unsigned char)value;
+    }
+  }
+  pthread_mutex_unlock(&kmm_lock);
+  return result;
 }
 
 /* Return the insertion link and address in the descending list of live regions.
@@ -570,6 +621,7 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid,
 
   addr_t result = (addr_t)-1;
   pthread_mutex_lock(&mmvm_lock);
+  pthread_mutex_lock(&kmm_lock);
   if (entry->rg_start != entry->rg_end)
     goto unlock;
 
@@ -621,6 +673,7 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid,
   result = 0;
 
 unlock:
+  pthread_mutex_unlock(&kmm_lock);
   pthread_mutex_unlock(&mmvm_lock);
   return result;
 }
@@ -678,7 +731,7 @@ int libkmem_copy_to_user(struct pcb_t *caller, uint32_t source,
 	return libkmem_copy(caller, SYSMEM_COPY_TO_USER, source, destination, offset, size);
 }
 
-/* The kernel copy path holds mmvm_lock while checking and accessing a region. */
+/* The kernel copy path keeps both memory mutexes held during the transfer. */
 static int get_copy_range(struct pcb_t *caller, int rgid, int vmaid,
                           unsigned long mode_bit, addr_t offset,
                           addr_t size, addr_t *physical)
@@ -730,6 +783,7 @@ static int __kmem_copy(struct pcb_t *caller, int source, int destination,
 
 	int result = -1;
 	pthread_mutex_lock(&mmvm_lock);
+  pthread_mutex_lock(&kmm_lock);
 	int user_rgid = to_user ? destination : source;
 	const struct vm_rg_struct *user_rg = get_symrg_byid(caller->mm, user_rgid);
 	int kernel_rgid = to_user ? source : destination;
@@ -763,6 +817,7 @@ static int __kmem_copy(struct pcb_t *caller, int source, int destination,
 	}
 
 unlock:
+  pthread_mutex_unlock(&kmm_lock);
 	pthread_mutex_unlock(&mmvm_lock);
 	return result;
 }
@@ -772,9 +827,11 @@ static int release_kernel_region(struct pcb_t *caller, struct vm_rg_struct *regi
 static int free_kernel_region_by_id(struct pcb_t *caller, int rgid)
 {
   pthread_mutex_lock(&mmvm_lock);
+  pthread_mutex_lock(&kmm_lock);
 
   struct vm_rg_struct *region = get_symrg_byid(caller->mm, rgid);
   int status = release_kernel_region(caller, region);
+  pthread_mutex_unlock(&kmm_lock);
   pthread_mutex_unlock(&mmvm_lock);
   return status;
 }
@@ -848,7 +905,7 @@ int __write_user_mem(struct pcb_t *caller, int vmaid, int rgid,
 	return MEMPHY_write(caller->krnl->mram, physical, value);
 }
 
-/* The caller holds mmvm_lock while releasing frames. */
+/* The caller holds kmm_lock while releasing frames. */
 static void release_frame(struct memphy_struct *ram, struct framephy_struct **link)
 {
 	struct framephy_struct *frame = *link;
@@ -860,7 +917,7 @@ static void release_frame(struct memphy_struct *ram, struct framephy_struct **li
 	ram->free_fp_list = frame;
 }
 
-/* The caller holds mmvm_lock for the whole release. */
+/* The caller holds both memory mutexes for the whole release. */
 static int release_kernel_region(struct pcb_t *caller,
                                  struct vm_rg_struct *region)
 {
@@ -977,8 +1034,10 @@ int free_pcb_memph(struct pcb_t *caller)
 
 	struct memphy_struct *ram = caller->krnl != NULL ? caller->krnl->mram : NULL;
 	pthread_mutex_lock(&mmvm_lock);
+  pthread_mutex_lock(&kmm_lock);
 	if (release_kernel_regions(caller) != 0)
 	{
+    pthread_mutex_unlock(&kmm_lock);
 		pthread_mutex_unlock(&mmvm_lock);
 		return -1;
 	}
@@ -993,6 +1052,7 @@ int free_pcb_memph(struct pcb_t *caller)
 				link = &(*link)->fp_next;
 		}
 	}
+  pthread_mutex_unlock(&kmm_lock);
 
 	while (mm->mmap != NULL)
 	{
