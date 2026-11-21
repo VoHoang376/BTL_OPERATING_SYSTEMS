@@ -64,6 +64,8 @@ struct cpu_args {
 static void * cpu_routine(void * args) {
 	struct timer_id_t * timer_id = ((struct cpu_args*)args)->timer_id;
 	int id = ((struct cpu_args*)args)->id;
+	/* This CPU can now receive DMA interrupts (interrupt handler in sysbus.c) */
+	dma_register_cpu(id);
 	/* Check for new process in ready queue */
 	int time_left = 0;
 	struct pcb_t * proc = NULL;
@@ -113,6 +115,7 @@ static void * cpu_routine(void * args) {
 		time_left--;
 		next_slot(timer_id);
 	}
+	dma_unregister_cpu();   /* take pending DMA interrupts, then stop receiving */
 	detach_event(timer_id);
 	pthread_exit(NULL);
 }
@@ -120,19 +123,19 @@ static void * cpu_routine(void * args) {
 
 static void * co_processor(void *arg) {
     (void)arg;
-    /* TODO: Initialize the internal Verilator RTL simulation.
-	 *       This is necessary to ensure that the RTL simulation is ready for DPI calls.
-      */
+    /* Bring up the internal Verilator RTL simulation so it is ready for DPI calls. */
     if (rtl_dma_init_simulation() != 0) {
         printf("Cannot initialize RTL simulation\n");
         return (void*)1;
     }
-	
-	/* TODO: This asynchronous implementation of DMA
-     *        DMA completion callback is not yet implemented in this testbench
-     */
-    // Install callback handler
-    //dma_done_callback();  // Call the callback to signal DMA completion
+
+    /* Asynchronous DMA: CPUs only queue requests with dma_submit() and carry on.
+     * This thread owns the chip: it takes the requests one at a time and runs
+     * them. The chip itself calls dma_done_callback() when a copy finishes.
+     * The loop ends after main() calls dma_queue_shutdown() and the queue is empty. */
+    dma_worker_loop();
+
+    rtl_dma_cleanup_simulation();
     return NULL;
 }
 
@@ -282,6 +285,9 @@ int main(int argc, char * argv[]) {
 	/* Create MEM RAM */
 	init_memphy(&mram, memramsz, rdmflag);
 
+	/* The DMA chip reaches the real OS RAM through the system bus */
+	memory_bus_use_os_ram(mram.storage, (size_t)mram.maxsz);
+
         /* Create all MEM SWAP */ 
 	int sit;
 	for(sit = 0; sit < PAGING_MAX_MMSWP; sit++)
@@ -302,6 +308,10 @@ int main(int argc, char * argv[]) {
 	/* Init scheduler */
 	init_scheduler();
 
+	/* Install the DMA interrupt handler BEFORE any thread is created
+	 * (threads inherit "interrupt blocked"; only CPU threads enable it). */
+	dma_irq_install();
+
 	/* Run CPU and loader */
 #ifdef MM_PAGING
 	pthread_create(&ld, NULL, ld_routine, (void*)mm_ld_args);
@@ -321,6 +331,14 @@ int main(int argc, char * argv[]) {
 		pthread_join(cpu[i], NULL);
 	}
 	pthread_join(ld, NULL);
+
+	/* Let the co-processor finish every queued DMA request, then stop it */
+	dma_queue_shutdown();
+	pthread_join(*dma, NULL);
+	dma_wait_idle();   /* shutdown only: all interrupts delivered */
+	printf("[DMA] interrupts handled: %lu (ok=%lu, failed=%lu)\n",
+	       dma_irq_count(), dma_completed_count(), dma_failed_count());
+	free(dma);
 
 	/* Stop timer */
 	stop_timer();

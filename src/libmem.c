@@ -17,6 +17,7 @@
 #include "syscall.h"
 #include "libmem.h"
 #include "dma.h"
+#include "sysbus.h"
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -230,7 +231,7 @@ int pg_getpage(struct mm_struct *mm, int pgn, int *fpn, struct pcb_t *caller)
     struct sc_regs regs;
 
     /* TODO Initialize the target frame storing our variable */
-//  addr_t tgtfpn 
+    addr_t tgtfpn;
 
     /* TODO: Play with your paging theory here */
     /* Find victim page */
@@ -245,19 +246,27 @@ int pg_getpage(struct mm_struct *mm, int pgn, int *fpn, struct pcb_t *caller)
       return -1;
     }
 
-    /* TODO: Implement swap frame from MEMRAM to MEMSWP and vice versa*/
+    /* Get victim frame number from victim page's PTE */
+    vicpte = pte_get_entry(caller->mm, vicpgn, caller);
+    vicfpn = PAGING_FPN(vicpte);
 
-    /* TODO copy victim frame to swap 
-     * SWP(vicfpn <--> swpfpn)
-     * SYSCALL 1 sys_memmap
+    /* Swap frame from MEMRAM to MEMSWP:
+     * copy victim frame to swap (SWP(vicfpn <-> swpfpn))
+     * SYSCALL sys_memmap with SYSMEM_SWP_OP
      */
+    regs.a1 = SYSMEM_SWP_OP;
+    regs.a2 = vicfpn;
+    regs.a3 = swpfpn;
+    _syscall(caller->krnl, caller->pid, 17, &regs);
 
+    /* Update page table - victim page is now in swap */
+    pte_set_swap(caller, vicpgn, 0, swpfpn);
 
-    /* Update page table */
-    //pte_set_swap(...);
+    /* tgtfpn: the freed frame from victim becomes the target */
+    tgtfpn = vicfpn;
 
-    /* Update its online status of the target page */
-    //pte_set_fpn(...);
+    /* Update its online status of the target page - map page pgn to tgtfpn */
+    pte_set_fpn(caller->mm, pgn, tgtfpn, caller);
 
     enlist_pgn_node(&caller->mm->fifo_pgn, pgn);
   }
@@ -276,19 +285,26 @@ int pg_getpage(struct mm_struct *mm, int pgn, int *fpn, struct pcb_t *caller)
 int pg_getval(struct mm_struct *mm, int addr, BYTE *data, struct pcb_t *caller)
 {
   int pgn = PAGING_PGN(addr);
-//int off = ...
+  int off = PAGING_OFFST(addr);
   int fpn;
 
   if (pg_getpage(mm, pgn, &fpn, caller) != 0)
     return -1; /* invalid page access */
 
-//int phyaddr = ...
+  /* Physical address = frame * pagesize + offset */
+#ifdef MM64
+  int phyaddr = fpn * PAGING64_PAGESZ + off;
+#else
+  int phyaddr = fpn * PAGING_PAGESZ + off;
+#endif
 
-  /* TODO 
-   *  MEMPHY_read(caller->krnl->mram, phyaddr, data);
-   *  MEMPHY READ 
-   *  SYSCALL 17 sys_memmap with SYSMEM_IO_READ
-   */
+  /* Read the value via SYSCALL 17 sys_memmap with SYSMEM_IO_READ */
+  struct sc_regs regs;
+  regs.a1 = SYSMEM_IO_READ;
+  regs.a2 = phyaddr;
+  regs.a3 = 0;
+  _syscall(caller->krnl, caller->pid, 17, &regs);
+  *data = (BYTE) regs.a3;
 
   return 0;
 }
@@ -302,19 +318,26 @@ int pg_getval(struct mm_struct *mm, int addr, BYTE *data, struct pcb_t *caller)
 int pg_setval(struct mm_struct *mm, int addr, BYTE value, struct pcb_t *caller)
 {
   int pgn = PAGING_PGN(addr);
-//int off = ...
+  int off = PAGING_OFFST(addr);
   int fpn;
 
   /* Get the page to MEMRAM, swap from MEMSWAP if needed */
   if (pg_getpage(mm, pgn, &fpn, caller) != 0)
     return -1; /* invalid page access */
 
+  /* Physical address = frame * pagesize + offset */
+#ifdef MM64
+  int phyaddr = fpn * PAGING64_PAGESZ + off;
+#else
+  int phyaddr = fpn * PAGING_PAGESZ + off;
+#endif
 
-  /* TODO 
-   *  MEMPHY_write(caller->krnl->mram, phyaddr, value);
-   *  MEMPHY WRITE with SYSMEM_IO_WRITE 
-   * SYSCALL 17 sys_memmap
-   */
+  /* Write value via SYSCALL 17 sys_memmap with SYSMEM_IO_WRITE */
+  struct sc_regs regs;
+  regs.a1 = SYSMEM_IO_WRITE;
+  regs.a2 = phyaddr;
+  regs.a3 = value;
+  _syscall(caller->krnl, caller->pid, 17, &regs);
 
   return 0;
 }
@@ -457,6 +480,24 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t 
 
 
 
+/* dma_copy_byte - copy ONE byte between two PHYSICAL offsets through the CPU
+ * path (syscall 17 = sys_memmap, same call pg_getval/pg_setval use). */
+static void dma_copy_byte(struct pcb_t *caller, uint64_t src_phy, uint64_t dst_phy)
+{
+  struct sc_regs regs;
+
+  regs.a1 = SYSMEM_IO_READ;
+  regs.a2 = src_phy;
+  regs.a3 = 0;
+  _syscall(caller->krnl, caller->pid, 17, &regs);
+  BYTE value = (BYTE)regs.a3;
+
+  regs.a1 = SYSMEM_IO_WRITE;
+  regs.a2 = dst_phy;
+  regs.a3 = value;
+  _syscall(caller->krnl, caller->pid, 17, &regs);
+}
+
 /*libmem_dma_memcpy - DMA memcpy
  *@caller: caller
  *@src: source region
@@ -466,17 +507,89 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t 
  */
 int libmem_dma_memcpy(struct pcb_t *caller, uint32_t src, uint32_t dst, uint32_t offset, uint32_t size)
 {
-  /* TODO: provide DMA mempy */
+  struct vm_rg_struct *srcrg = get_symrg_byid(caller->mm, (int)src);
+  struct vm_rg_struct *dstrg = get_symrg_byid(caller->mm, (int)dst);
+  uint32_t copied = 0;
 
-  //struct krnl_t *krnl = caller->krnl;
+  if (srcrg == NULL || dstrg == NULL || size == 0) {
+    return -1;
+  }
 
-  /*
-   *  TODO: provide asynchronous dma memcpy
-   *        handling the dma_done_callback
-   */
-  //do_dma(caller, (uint64_t) src, (uint64_t) dst, (uint64_t) size);
-  //krnl->...
-  //krnl->...
+  /* FIX 2: offset + size must stay inside BOTH regions (this also rejects
+   * freed regions, whose start == end == 0). Done in 64 bit: no overflow. */
+  if (srcrg->rg_end <= srcrg->rg_start || dstrg->rg_end <= dstrg->rg_start ||
+      (uint64_t)offset + size > (uint64_t)(srcrg->rg_end - srcrg->rg_start) ||
+      (uint64_t)offset + size > (uint64_t)(dstrg->rg_end - dstrg->rg_start)) {
+    return -1;
+  }
+
+  /* Walk one page at a time. Same address math as pg_getval. */
+  while (copied < size) {
+    addr_t src_va = srcrg->rg_start + offset + copied;
+    addr_t dst_va = dstrg->rg_start + offset + copied;
+    int src_fpn = 0;
+    int dst_fpn = 0;
+    int src_off;
+    int dst_off;
+    uint32_t chunk;
+    uint32_t src_room;
+    uint32_t dst_room;
+    uint64_t src_phy;
+    uint64_t dst_phy;
+
+    /* Page tables and swap are shared with the other CPUs: same lock as
+     * __alloc/__free/__write. Held only while translating and queueing. */
+    pthread_mutex_lock(&mmvm_lock);
+
+    if (pg_getpage(caller->mm, PAGING_PGN(src_va), &src_fpn, caller) != 0) {
+      pthread_mutex_unlock(&mmvm_lock);
+      return -1;
+    }
+    if (pg_getpage(caller->mm, PAGING_PGN(dst_va), &dst_fpn, caller) != 0) {
+      pthread_mutex_unlock(&mmvm_lock);
+      return -1;
+    }
+
+    src_off = PAGING_OFFST(src_va);
+    dst_off = PAGING_OFFST(dst_va);
+#ifdef MM64
+    src_phy = (uint64_t)src_fpn * PAGING64_PAGESZ + src_off;
+    dst_phy = (uint64_t)dst_fpn * PAGING64_PAGESZ + dst_off;
+#else
+    src_phy = (uint64_t)src_fpn * PAGING_PAGESZ + src_off;
+    dst_phy = (uint64_t)dst_fpn * PAGING_PAGESZ + dst_off;
+#endif
+
+    chunk = size - copied;
+    src_room = (uint32_t)(PAGING_PAGESZ - src_off);
+    dst_room = (uint32_t)(PAGING_PAGESZ - dst_off);
+    if (chunk > src_room) {
+      chunk = src_room;
+    }
+    if (chunk > dst_room) {
+      chunk = dst_room;
+    }
+
+    /* FIX 3: the chip always moves whole 32-bit words, so a length that is not
+     * a multiple of 4 would overwrite up to 3 bytes AFTER the destination
+     * (possibly another process's page). Give the chip only the multiple-of-4
+     * part; the 0..3 leftover bytes are copied by the CPU (sys_memmap IO). */
+    uint32_t body = chunk & ~3u;
+
+    /* Slide 22 step 1: command the DMA and go on. dma_submit() returns at
+     * once. When the chip finishes it sends an INTERRUPT to this CPU thread
+     * and the interrupt handler (sysbus.c) runs here (step 4). The request
+     * holds only physical offsets + pid (no pcb_t pointer). */
+    if (body != 0 && dma_submit((uint32_t)caller->pid, src_phy, dst_phy, body) != 0) {
+      pthread_mutex_unlock(&mmvm_lock);
+      return -1;
+    }
+    for (uint32_t i = body; i < chunk; i++) {
+      dma_copy_byte(caller, src_phy + i, dst_phy + i);
+    }
+    pthread_mutex_unlock(&mmvm_lock);
+    copied += chunk;
+  }
 
   return 0;
 }
