@@ -23,8 +23,7 @@ static struct queue_t running_list;
 static struct queue_t mlq_ready_queue[MAX_PRIO];
 static int slot[MAX_PRIO];
 
-struct pcb_t *find_proc_by_pid_safe(uint32_t pid)
-{
+struct pcb_t * find_proc_by_pid_safe(uint32_t pid) {
 	struct pcb_t *ret = NULL;
 
 	pthread_mutex_lock(&queue_lock);
@@ -40,8 +39,7 @@ struct pcb_t *find_proc_by_pid_safe(uint32_t pid)
 }
 #endif
 
-void remove_running_proc(struct pcb_t *proc)
-{
+void remove_running_proc(struct pcb_t * proc) {
 	pthread_mutex_lock(&queue_lock);
 	int kept = 0;
 	for (int i = 0; i < running_list.size; ++i) {

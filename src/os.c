@@ -149,62 +149,59 @@ static void * co_processor(void *arg) {
 }
 
 static void * ld_routine(void * args) {
-  printf("ld_routine\n");
+	printf("ld_routine\n");
 #ifdef MM_PAGING
-  const struct mmpaging_ld_args *paging = args;
-  struct timer_id_t *timer_id = paging->timer_id;
-  os.mram = paging->mram;
-  os.mswp = paging->mswp;
-  os.active_mswp = paging->active_mswp;
-  os.mm = malloc(sizeof(*os.mm));
+	const struct mmpaging_ld_args *paging = args;
+	struct timer_id_t *timer_id = paging->timer_id;
+	os.mram = paging->mram;
+	os.mswp = paging->mswp;
+	os.active_mswp = paging->active_mswp;
+	os.mm = malloc(sizeof(*os.mm));
 #ifdef MM64
-  if (init_mm(os.mm, NULL) != 0)
-  {
-    fprintf(stderr, "Cannot initialize kernel memory\n");
-    exit(EXIT_FAILURE);
-  }
-  os.krnl_pgd = os.mm->pgd;
+	if (init_mm(os.mm, NULL) != 0) {
+		fprintf(stderr, "Cannot initialize kernel memory\n");
+		exit(EXIT_FAILURE);
+	}
+	os.krnl_pgd = os.mm->pgd;
 #else
-  os.krnl_pgd = malloc(PAGING_MAX_PGN * sizeof(*os.krnl_pgd));
-  init_mm(os.mm, NULL);
+	os.krnl_pgd = malloc(PAGING_MAX_PGN * sizeof(*os.krnl_pgd));
+	init_mm(os.mm, NULL);
 #endif
 #else
-  struct timer_id_t *timer_id = args;
+	struct timer_id_t *timer_id = args;
 #endif
 
-  for (int i = 0; i < num_processes; i++)
-  {
-    struct pcb_t *proc = load(ld_processes.path[i]);
-    proc->krnl = &os;
+	for (int i = 0; i < num_processes; i++) {
+		struct pcb_t *proc = load(ld_processes.path[i]);
+		proc->krnl = &os;
 
 #ifdef MLQ_SCHED
-    proc->prio = ld_processes.prio[i];
+		proc->prio = ld_processes.prio[i];
 #endif
 
-    while (current_time() < ld_processes.start_time[i])
-      next_slot(timer_id);
+		while (current_time() < ld_processes.start_time[i])
+			next_slot(timer_id);
 
 #ifdef MM_PAGING
-    proc->mm = malloc(sizeof(*proc->mm));
-    if (init_mm(proc->mm, proc) != 0)
-    {
-      fprintf(stderr, "Cannot initialize memory for PID %u\n", proc->pid);
-      exit(EXIT_FAILURE);
-    }
+		proc->mm = malloc(sizeof(*proc->mm));
+		if (init_mm(proc->mm, proc) != 0) {
+			fprintf(stderr, "Cannot initialize memory for PID %u\n", proc->pid);
+			exit(EXIT_FAILURE);
+		}
 #endif
 
-    printf("\tLoaded a process at %s, PID: %u PRIO: %u\n",
-           ld_processes.path[i], proc->pid, proc->prio);
-    add_proc(proc);
-    free(ld_processes.path[i]);
-    next_slot(timer_id);
-  }
+		printf("\tLoaded a process at %s, PID: %u PRIO: %u\n",
+		       ld_processes.path[i], proc->pid, proc->prio);
+		add_proc(proc);
+		free(ld_processes.path[i]);
+		next_slot(timer_id);
+	}
 
-  free(ld_processes.path);
-  free(ld_processes.start_time);
-  done = 1;
-  detach_event(timer_id);
-  pthread_exit(NULL);
+	free(ld_processes.path);
+	free(ld_processes.start_time);
+	done = 1;
+	detach_event(timer_id);
+	pthread_exit(NULL);
 }
 
 static void read_config(const char * path) {

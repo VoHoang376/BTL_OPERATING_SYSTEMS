@@ -69,101 +69,101 @@ int write(
 
 int run(struct pcb_t *proc)
 {
-  if (proc->pc >= proc->code->size)
-    return 1;
+	if (proc->pc >= proc->code->size)
+		return 1;
 
-  struct inst_t ins = proc->code->text[proc->pc];
-  proc->pc++;
-  int stat = 1;
+	struct inst_t ins = proc->code->text[proc->pc];
+	proc->pc++;
+	int stat = 1;
 
-  switch (ins.opcode)
-  {
-  case CALC:
-    stat = calc(proc);
-    break;
+	switch (ins.opcode)
+	{
+	case CALC:
+		stat = calc(proc);
+		break;
 
-  case ALLOC:
+	case ALLOC:
 #ifdef MM_PAGING
-    stat = liballoc(proc, ins.arg_0, ins.arg_1);
+		stat = liballoc(proc, ins.arg_0, ins.arg_1);
 #else
-    stat = alloc(proc, ins.arg_0, ins.arg_1);
+		stat = alloc(proc, ins.arg_0, ins.arg_1);
 #endif
-    break;
+		break;
 
 #ifdef MM_PAGING
-  case KMALLOC:
-    if (ins.arg_0 <= UINT32_MAX && ins.arg_1 < sizeof(proc->regs) / sizeof(proc->regs[0]))
-      stat = libkmem_malloc(proc, ins.arg_0, ins.arg_1);
-    else
-      stat = -1;
-    break;
+	case KMALLOC:
+		if (ins.arg_0 <= UINT32_MAX && ins.arg_1 < sizeof(proc->regs) / sizeof(proc->regs[0]))
+			stat = libkmem_malloc(proc, ins.arg_0, ins.arg_1);
+		else
+			stat = -1;
+		break;
 
-  case COPY_FROM_USER:
-  case COPY_TO_USER:
-  {
-    const unsigned int nregs = sizeof(proc->regs) / sizeof(proc->regs[0]);
-    if (ins.arg_0 >= nregs || ins.arg_1 >= nregs ||
-        ins.arg_2 > UINT32_MAX || ins.arg_3 > UINT32_MAX)
-      stat = -1;
-    else if (ins.opcode == COPY_FROM_USER)
-      stat = libkmem_copy_from_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
-    else
-      stat = libkmem_copy_to_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
-    break;
-  }
+	case COPY_FROM_USER:
+	case COPY_TO_USER:
+	{
+		const unsigned int nregs = sizeof(proc->regs) / sizeof(proc->regs[0]);
+		if (ins.arg_0 >= nregs || ins.arg_1 >= nregs ||
+		    ins.arg_2 > UINT32_MAX || ins.arg_3 > UINT32_MAX)
+			stat = -1;
+		else if (ins.opcode == COPY_FROM_USER)
+			stat = libkmem_copy_from_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		else
+			stat = libkmem_copy_to_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		break;
+	}
 
-  case DMA_MEMCPY:
-    stat = libmem_dma_memcpy(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
-    break;
+	case DMA_MEMCPY:
+		stat = libmem_dma_memcpy(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		break;
 #endif
 
-  case FREE:
+	case FREE:
 #ifdef MM_PAGING
-    stat = libfree(proc, ins.arg_0);
+		stat = libfree(proc, ins.arg_0);
 #else
-    stat = free_data(proc, ins.arg_0);
+		stat = free_data(proc, ins.arg_0);
 #endif
-    break;
+		break;
 
-  case READ:
+	case READ:
 #ifdef MM_PAGING
-  {
-    const unsigned int nregs = sizeof(proc->regs) / sizeof(proc->regs[0]);
-    uint32_t data;
+	{
+		const unsigned int nregs = sizeof(proc->regs) / sizeof(proc->regs[0]);
+		uint32_t data;
 
-    if (ins.arg_0 >= nregs || ins.arg_2 >= nregs)
-    {
-      stat = -1;
-      break;
-    }
+		if (ins.arg_0 >= nregs || ins.arg_2 >= nregs)
+		{
+			stat = -1;
+			break;
+		}
 
-    stat = libread(proc, ins.arg_0, ins.arg_1, &data);
-    if (stat == 0)
-      proc->regs[ins.arg_2] = data;
-  }
+		stat = libread(proc, ins.arg_0, ins.arg_1, &data);
+		if (stat == 0)
+			proc->regs[ins.arg_2] = data;
+	}
 #else
-    stat = read(proc, ins.arg_0, ins.arg_1, ins.arg_2);
+		stat = read(proc, ins.arg_0, ins.arg_1, ins.arg_2);
 #endif
-    break;
+		break;
 
-  case WRITE:
+	case WRITE:
 #ifdef MM_PAGING
-    if (ins.arg_1 < sizeof(proc->regs) / sizeof(proc->regs[0]))
-      stat = libwrite(proc, (BYTE)ins.arg_0, ins.arg_1, ins.arg_2);
-    else
-      stat = -1;
+		if (ins.arg_1 < sizeof(proc->regs) / sizeof(proc->regs[0]))
+			stat = libwrite(proc, (BYTE)ins.arg_0, ins.arg_1, ins.arg_2);
+		else
+			stat = -1;
 #else
-    stat = write(proc, ins.arg_0, ins.arg_1, ins.arg_2);
+		stat = write(proc, ins.arg_0, ins.arg_1, ins.arg_2);
 #endif
-    break;
+		break;
 
-  case SYSCALL:
-    stat = libsyscall(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
-    break;
+	case SYSCALL:
+		stat = libsyscall(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
+		break;
 
-  default:
-    stat = 1;
-  }
+	default:
+		stat = 1;
+	}
 
-  return stat;
+	return stat;
 }
