@@ -9,7 +9,8 @@ extern "C" {
 
 /* Execute an instruction of a process. Return 0
  * if the instruction is executed successfully.
- * Otherwise, return 1. */
+ * A DMA dependency returns -EAGAIN and leaves the PC on this instruction.
+ * Other failures return a nonzero status. */
 int run(struct pcb_t * proc);
 
 #ifdef __cplusplus

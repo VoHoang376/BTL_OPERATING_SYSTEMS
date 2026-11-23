@@ -17,8 +17,10 @@
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 
 // DMA RTL simulation structures
+static std::mutex g_chip_lock;
 static Vdma_top* top = nullptr;
 static VerilatedContext* context = nullptr;
 static VerilatedVcdC* tracer = nullptr;
@@ -78,6 +80,7 @@ extern "C" void rtl_dma_cleanup_simulation(void) {
  * length: number of bytes to copy
  */
 extern "C" int dpi_rtl_dma_copy(uint64_t source, uint64_t destination, uint64_t length) {
+    std::lock_guard<std::mutex> guard(g_chip_lock);
     if (!top) {
         printf("Cannot perform DMA copy: RTL simulation not initialized\n");
         return -1;
@@ -88,6 +91,9 @@ extern "C" int dpi_rtl_dma_copy(uint64_t source, uint64_t destination, uint64_t 
     //       (unsigned long long) destination,
     //       (unsigned long long) length);
     
+    if (dma_bus_begin(source, destination, length) != 0)
+        return -1;
+
     // Reset
     top->clk = 0;
     top->rst_n = 0;
@@ -112,10 +118,10 @@ extern "C" int dpi_rtl_dma_copy(uint64_t source, uint64_t destination, uint64_t 
     top->ch_pause = 0;
     
     // Run simulation
-    int cycle = 0;
-    int max_cycles = 100000;
+    uint64_t cycle = 0;
+    uint64_t max_cycles = 64 + 64 * ((length + 3) / 4);
     
-    while (cycle < max_cycles && !top->ch_done) {
+    while (cycle < max_cycles && !top->ch_done && !top->ch_error) {
         top->clk ^= 1;
         top->eval();
         
@@ -132,7 +138,8 @@ extern "C" int dpi_rtl_dma_copy(uint64_t source, uint64_t destination, uint64_t 
         cycle++;
     }
 
-    // ch_done is high now. Keep clocking (2 full cycles) with ch_enable still asserted
+    bool completed = top->ch_done && !top->ch_error && top->ch_bytes_transferred == length;
+    // ch_done is high on success. Keep clocking (2 full cycles) with ch_enable still asserted
     // dma_done_callback() on the next rising edge.
     top->clk ^= 1;
     top->eval();
@@ -145,7 +152,8 @@ extern "C" int dpi_rtl_dma_copy(uint64_t source, uint64_t destination, uint64_t 
     
     //printf("RTL DMA Copy: Completed in %d cycles, ch_done=%d\n", cycle, (int)top->ch_done);
 
-    return top->ch_done ? 0 : -1;
+    int bus_status = dma_bus_end();
+    return completed && bus_status == 0 ? 0 : -1;
 }
 
 

@@ -19,135 +19,91 @@
 #define DMA_MAIN 0
 #endif
 
+
 #include "sysbus.h"
 #include "dpi_rtl.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
-#include <cstring>
-#include <cstdbool>
-#include <thread>
-#include <atomic>
-
-// Generated DPI functions from RTL
-#include <verilated.h>
-#include <verilated_vcd_c.h>
-#include "Vdma_top.h"
-#include "Vdma_top__Dpi.h"  
-
-#if DMA_MAIN == 1
-extern "C" {
-#include "common.h"
-#include "os-mm.h"
-}
-#endif
-
-// RTL Direct Test - Drive Verilator RTL directly
-extern "C" int dpi_rtl_dma_copy(uint64_t src_offset, uint64_t dst_offset, uint64_t length);
-extern "C" int dpi_rtl_dma_is_available(void);
+#include "dma.h"
 
 /*
  * dpi_dma_copy - perform DMA copy via DPI
- * src_offset: source memory offset
- * dst_offset: destination memory offset
- * length: number of bytes to copy
+ * src_offset: source PHYSICAL offset in RAM
+ * dst_offset: destination PHYSICAL offset in RAM
+ * length: number of bytes to copy (the last beat can be partial)
+ * caller is unused on purpose: the process may be gone when the copy runs.
  */
 int dpi_dma_copy(struct pcb_t *caller, uint64_t src_offset, uint64_t dst_offset, uint64_t length) {
-    void *src = NULL;
-    void *dst = NULL;
-    //struct krnl_t *krnl = caller->krnl;
+    (void)caller;
+    if (length == 0 || length > UINT32_MAX)
+        return -1;
+    void *src = memory_bus_ptr(src_offset, length);
+    void *dst = memory_bus_ptr(dst_offset, length);
 
-    if (memory_bank_is_available()) {
-        printf("dma_testbench modeo with dpi_dma_copy from memory bank\n");
-        src = memory_bank_get_ptr(src_offset);
-        dst = memory_bank_get_ptr(dst_offset);
-    } else {
-        /*
-         * TODO: map system OS memory address
-         */
-        //printf("dma_testbench modeo with OS memory address\n");
-        //src =  krnl->...
-        //dst =  krnl->...
+    if (src == NULL || dst == NULL) {
+        printf("dpi_dma_copy: cannot map source or destination "
+               "(src=%llu dst=%llu len=%llu)\n",
+               (unsigned long long) src_offset,
+               (unsigned long long) dst_offset,
+               (unsigned long long) length);
+        return -1;
     }
 
+#if DMA_MAIN == 1
     printf("dpi_dma_copy: src=%llu, dst=%llu, len=%llu\n", 
-		    (unsigned long long) src_offset, 
-		    (unsigned long long) dst_offset,
-		    (unsigned long long) length);
+           (unsigned long long) src_offset,
+           (unsigned long long) dst_offset,
+           (unsigned long long) length);
 
+    /* Testbench only: fill the source with a known pattern 1..255 */
     uint8_t* psrc = (uint8_t*)src;
     uint64_t pattern_length = (length <= 255) ? length : 255;
-    
     for (uint64_t i = 0; i < length; i++) {
-        // Pattern cycles through 0x01 to min(length, 255)
         psrc[i] = (uint8_t)((i % pattern_length) + 1);
     }
 
+    uint64_t show = (length < 8) ? length : 8;
     printf("Before copy:\n");
-    printf("  src[0] = 0x%02x, src[1] = 0x%02x\n"
-           "  src[2] = 0x%02x, src[3] = 0x%02x\n"
-           "  src[4] = 0x%02x, src[5] = 0x%02x\n"
-           "  src[6] = 0x%02x, src[7] = 0x%02x\n",
-           ((uint8_t*)src)[0], ((uint8_t*)src)[1],
-           ((uint8_t*)src)[2], ((uint8_t*)src)[3],
-           ((uint8_t*)src)[4], ((uint8_t*)src)[5],
-           ((uint8_t*)src)[6], ((uint8_t*)src)[7]);
-    printf("  dst[0] = 0x%02x, dst[1] = 0x%02x\n"
-           "  dst[2] = 0x%02x, dst[3] = 0x%02x\n"
-           "  dst[4] = 0x%02x, dst[5] = 0x%02x\n"
-           "  dst[6] = 0x%02x, dst[7] = 0x%02x\n",
-           ((uint8_t*)dst)[0], ((uint8_t*)dst)[1],
-           ((uint8_t*)dst)[2], ((uint8_t*)dst)[3],
-           ((uint8_t*)dst)[4], ((uint8_t*)dst)[5],
-           ((uint8_t*)dst)[6], ((uint8_t*)dst)[7]);
-
+    for (uint64_t i = 0; i < show; i++)
+        printf("  src[%llu] = 0x%02x   dst[%llu] = 0x%02x\n",
+               (unsigned long long) i, ((uint8_t*)src)[i],
+               (unsigned long long) i, ((uint8_t*)dst)[i]);
     printf("\nCalling RTL DMA...\n");
-    
+#else
+    printf("[DMA] %llu bytes: phys 0x%llx -> 0x%llx\n",
+           (unsigned long long) length,
+           (unsigned long long) src_offset,
+           (unsigned long long) dst_offset);
+#endif
+
     // Call the RTL DMA function directly with provided parameters
     int result = dpi_rtl_dma_copy(src_offset, dst_offset, length);
-    
+
+#if DMA_MAIN == 1
     printf("\nAfter copy:\n");
-    printf("  src[0] = 0x%02x, src[1] = 0x%02x\n"
-           "  src[2] = 0x%02x, src[3] = 0x%02x\n"
-           "  src[4] = 0x%02x, src[5] = 0x%02x\n"
-           "  src[6] = 0x%02x, src[7] = 0x%02x\n",
-           ((uint8_t*)src)[0], ((uint8_t*)src)[1],
-           ((uint8_t*)src)[2], ((uint8_t*)src)[3],
-           ((uint8_t*)src)[4], ((uint8_t*)src)[5],
-           ((uint8_t*)src)[6], ((uint8_t*)src)[7]);
-    printf("  dst[0] = 0x%02x, dst[1] = 0x%02x\n"
-           "  dst[2] = 0x%02x, dst[3] = 0x%02x\n"
-           "  dst[4] = 0x%02x, dst[5] = 0x%02x\n"
-           "  dst[6] = 0x%02x, dst[7] = 0x%02x\n",
-           ((uint8_t*)dst)[0], ((uint8_t*)dst)[1],
-           ((uint8_t*)dst)[2], ((uint8_t*)dst)[3],
-           ((uint8_t*)dst)[4], ((uint8_t*)dst)[5],
-           ((uint8_t*)dst)[6], ((uint8_t*)dst)[7]);
-    
+    for (uint64_t i = 0; i < show; i++)
+        printf("  src[%llu] = 0x%02x   dst[%llu] = 0x%02x\n",
+               (unsigned long long) i, ((uint8_t*)src)[i],
+               (unsigned long long) i, ((uint8_t*)dst)[i]);
+    for (uint64_t i = 0; result == 0 && i < length; ++i)
+        if (((uint8_t*)dst)[i] != (uint8_t)((i % pattern_length) + 1))
+            result = -1;
+#endif
+
     return result;
 }
 
 /*
- * do_dma - perform DMA function
- * source: source memory
- * destination: destination memory
- * length: number of bytes to copy
+ * do_dma - run ONE DMA transfer on the RTL chip and return when it is done.
+ *
+ * It is synchronous by itself. In ./os it is only called by the co-processor
+ * thread (dma_worker_loop), so CPU threads never wait for it: they use
+ * dma_submit() and continue. The standalone testbench calls it directly.
+ * source / destination are physical RAM offsets.
  */
 extern "C" int do_dma(struct pcb_t *caller,uint64_t source, uint64_t destination, uint64_t length) {
-    
-    int test_errors = 0;
-
-    /* Perform DMA copy using DPI with provided caller and parameters */
-    test_errors += dpi_dma_copy(caller, source, destination, length);
-
-    /*
-     * TODO: This asynchronous implementation of DMA
-     *        DMA completion callback is not yet implemented in this testbench
-     */
-    // Install callback handler
-    //dma_done_callback();  // Call the callback to signal DMA completion
-
-    return test_errors;
+    return dpi_dma_copy(caller, source, destination, length);
 }
 
 #if DMA_MAIN == 1
@@ -180,37 +136,23 @@ int main(int argc, char** argv) {
      * Initialize the system memory bank
      * This is necessary to independent standalone dma_testbench build .
      */
-    memory_bank_init(1024 * 1024);
+    if (memory_bank_init(1024 * 1024) == MEMORY_BANK_INVALID)
+        return EXIT_FAILURE;
 
     /* Initialize the internal Verilator RTL simulation
      * This is necessary to ensure that the RTL simulation is ready for DPI calls.
      */
     if (rtl_dma_init_simulation() != 0) {
         printf("Cannot initialize RTL simulation\n");
+        memory_bank_cleanup();
         return 1;
     }
 
-    /*
-    * Create process control block for the caller
-    * Properly initialize all required fields
-    */
-    struct pcb_t *caller = (struct pcb_t *)calloc(1, sizeof(struct pcb_t));
-    caller->krnl = (struct krnl_t *)calloc(1, sizeof(struct krnl_t));
-    caller->krnl->mm = (struct mm_struct *)calloc(1, sizeof(struct mm_struct));
-    caller->krnl->mram = (struct memphy_struct *)calloc(1, sizeof(struct memphy_struct));
-    caller->krnl->active_mswp = (struct memphy_struct *)calloc(1, sizeof(struct memphy_struct));
-    caller->mm = caller->krnl->mm;
-    caller->pid = 0;  // Set a default PID
-
-    int result = do_dma(caller, source, destination, length);
-
-    // Cleanup
-    free(caller->krnl->active_mswp);
-    free(caller->krnl->mram);
-    free(caller->krnl->mm);
-    free(caller->krnl);
-    free(caller);
-
-    return result;
+    int result = do_dma(NULL, source, destination, length);
+    rtl_dma_cleanup_simulation();
+    memory_bank_cleanup();
+    printf("DMA testbench: %llu bytes, %s\n", (unsigned long long)length,
+           result == 0 ? "PASS" : "FAIL");
+    return result == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 #endif

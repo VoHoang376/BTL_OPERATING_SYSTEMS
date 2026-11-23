@@ -18,6 +18,7 @@
 #endif
 
 #include <pthread.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -25,13 +26,14 @@
 #include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 #include "sysbus.h"
 #include "dpi_rtl.h"
 
 static int time_slot;
 static int num_cpus;
-static int done = 0;
+static atomic_bool loader_done = false;
 static struct krnl_t os;
 
 #ifdef MM_PAGING
@@ -63,19 +65,27 @@ struct cpu_args {
 static void * cpu_routine(void * args) {
 	struct timer_id_t * timer_id = ((struct cpu_args*)args)->timer_id;
 	int id = ((struct cpu_args*)args)->id;
+	if (dma_register_cpu(id) != 0) {
+		fprintf(stderr, "Cannot enable DMA interrupts on CPU %d\n", id);
+		exit(EXIT_FAILURE);
+	}
 	/* Check for new process in ready queue */
 	int time_left = 0;
 	struct pcb_t * proc = NULL;
 	while (1) {
+		bool loading_finished = atomic_load(&loader_done);
 		/* Check the status of current process */
 		if (proc == NULL) {
 			/* No process is running, the we load new process from
 		 	* ready queue */
 			proc = get_proc();
-			if (proc == NULL) {
-                           next_slot(timer_id);
-                           continue; /* First load failed. skip dummy load */
-                        }
+		}else if (proc->pc == proc->code->size && dma_regions_busy(proc->pid, -1, -1)) {
+			/* Keep its buffers live and let another process use this CPU. */
+			put_proc(proc);
+			proc = NULL;
+			time_left = 0;
+			next_slot(timer_id);
+			continue;
 		}else if (proc->pc == proc->code->size) {
 			printf("\tCPU %d: Processed %2d has finished\n",
 				id ,proc->pid);
@@ -105,7 +115,7 @@ static void * cpu_routine(void * args) {
 		}
 		
 		/* Recheck process status after loading new process */
-		if (proc == NULL && done) {
+		if (proc == NULL && loading_finished) {
 			/* No process to run, exit */
 			printf("\tCPU %d stopped\n", id);
 			break;
@@ -121,31 +131,27 @@ static void * cpu_routine(void * args) {
 		}
 		
 		/* Run current process */
-		run(proc);
-		time_left--;
+		if (run(proc) == -EAGAIN)
+			time_left = 0;
+		else
+			time_left--;
 		next_slot(timer_id);
 	}
 	detach_event(timer_id);
+	dma_unregister_cpu();
 	pthread_exit(NULL);
 }
 
 
 static void * co_processor(void *arg) {
-    (void)arg;
-    /* TODO: Initialize the internal Verilator RTL simulation.
-	 *       This is necessary to ensure that the RTL simulation is ready for DPI calls.
-      */
-    if (rtl_dma_init_simulation() != 0) {
-        printf("Cannot initialize RTL simulation\n");
-        return (void*)1;
-    }
-	
-	/* TODO: This asynchronous implementation of DMA
-     *        DMA completion callback is not yet implemented in this testbench
-     */
-    // Install callback handler
-    //dma_done_callback();  // Call the callback to signal DMA completion
-    return NULL;
+	(void)arg;
+	if (rtl_dma_init_simulation() != 0) {
+		fputs("Cannot initialize DMA simulation\n", stderr);
+		exit(EXIT_FAILURE);
+	}
+	int result = dma_worker_loop();
+	rtl_dma_cleanup_simulation();
+	return (void *)(intptr_t)result;
 }
 
 static void * ld_routine(void * args) {
@@ -199,7 +205,7 @@ static void * ld_routine(void * args) {
 
 	free(ld_processes.path);
 	free(ld_processes.start_time);
-	done = 1;
+	atomic_store(&loader_done, true);
 	detach_event(timer_id);
 	pthread_exit(NULL);
 }
@@ -285,7 +291,7 @@ int main(int argc, char * argv[]) {
 	read_config(path);
 
 	pthread_t * cpu = (pthread_t*)malloc(num_cpus * sizeof(pthread_t));
-	pthread_t * dma = (pthread_t*)malloc(sizeof(pthread_t));
+	pthread_t dma;
 	struct cpu_args * args =
 		(struct cpu_args*)malloc(sizeof(struct cpu_args) * num_cpus);
 	pthread_t ld;
@@ -312,6 +318,8 @@ int main(int argc, char * argv[]) {
 		return EXIT_FAILURE;
 	}
 
+	memory_bus_use_os_ram(mram.storage, (size_t)mram.maxsz);
+
         /* Create all MEM SWAP */ 
 	int sit;
 	for (sit = 0; sit < PAGING_MAX_MMSWP; sit++) {
@@ -331,6 +339,12 @@ int main(int argc, char * argv[]) {
 	};
 #endif
 
+	/* Install the IRQ before the timer, loader or CPUs inherit their signal mask. */
+	if (dma_irq_install() != 0 || pthread_create(&dma, NULL, co_processor, NULL) != 0) {
+		fputs("Cannot start DMA co-processor\n", stderr);
+		return EXIT_FAILURE;
+	}
+
 	/* Init scheduler */
 	start_timer();
 	init_scheduler();
@@ -346,19 +360,21 @@ int main(int argc, char * argv[]) {
 			cpu_routine, (void*)&args[i]);
 	}
 
-	/* Run co-processor */
-	pthread_create(dma, NULL, co_processor, NULL);
-
 	/* Wait for CPU and loader finishing */
 	for (i = 0; i < num_cpus; i++) {
 		pthread_join(cpu[i], NULL);
 	}
 	pthread_join(ld, NULL);
+	dma_queue_shutdown();
+	void *dma_status;
+	pthread_join(dma, &dma_status);
+	dma_irq_cleanup();
+	finish_scheduler();
 
 	/* Stop timer */
 	stop_timer();
 
-	return 0;
+	return (intptr_t)dma_status == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 
 }
 

@@ -49,6 +49,30 @@ int dpi_bank_read32_legacy(long long offset);
 // DPI Callback: Called from RTL when DMA write access
 int dpi_bank_write32_legacy(long long offset, int value);
 
+struct dma_segment {
+    uint64_t src, dst, len;  /* physical byte offsets and length */
+};
+
+void memory_bus_use_os_ram(void *storage, size_t size);
+void *memory_bus_os_ram_ptr(uint64_t offset, uint64_t len);
+void *memory_bus_ptr(uint64_t offset, uint64_t length);
+int dma_bus_begin(uint64_t source, uint64_t destination, uint64_t length);
+int dma_bus_end(void);
+
+/* Install SIGRTMIN in main before starting threads. Only simulated CPUs
+ * enable it; the worker directs each completion to the CPU that submitted it. */
+int dma_irq_install(void);
+int dma_register_cpu(int cpu_id);
+void dma_unregister_cpu(void);
+void dma_irq_cleanup(void);
+/* On success the queue owns segments until the CPU acknowledges the interrupt. */
+int dma_submit(uint32_t pid, int source, int destination,
+               struct dma_segment *segments, size_t count);
+int dma_regions_busy(uint32_t pid, int first, int second); /* first < 0: any region */
+int dma_address_busy(uint32_t pid, uint64_t address, int writing);
+int dma_worker_loop(void);
+void dma_queue_shutdown(void);
+
 // DPI Callback: Called from RTL when DMA transfer completes
 void dma_done_callback(void);
 #ifdef __cplusplus

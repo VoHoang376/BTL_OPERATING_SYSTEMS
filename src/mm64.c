@@ -277,15 +277,26 @@ addr_t vmap_page_range(struct pcb_t *caller,           // process call
     if (fpit == NULL || fpit->owner != mm || fpit->fpn >= frames_in_ram ||
         pte_get_entry(mm, pgn, caller) != 0 ||
         pte_set_fpn(mm, pgn, fpit->fpn, caller) != 0)
-      goto rollback;
+      break;
   }
 
-  if (fpit != NULL)
-    goto rollback;
+  bool complete = mapped == pgnum && fpit == NULL;
+  for (int i = 0; complete && i < pgnum; ++i)
+    complete = enlist_pgn_node(&mm->fifo_pgn, first_pgn + i) == 0;
 
-  for (int i = 0; i < pgnum; ++i)
-    if (enlist_pgn_node(&mm->fifo_pgn, first_pgn + i) != 0)
-      goto rollback;
+  if (!complete)
+  {
+    while (mapped > 0)
+      pte_set_entry(mm, first_pgn + --mapped, 0, caller);
+
+    while (mm->fifo_pgn != old_fifo)
+    {
+      struct pgn_t *node = mm->fifo_pgn;
+      mm->fifo_pgn = node->pg_next;
+      free(node);
+    }
+    return (addr_t)-1;
+  }
 
   ret_rg->rg_start = addr;
   ret_rg->rg_end = addr + size;
@@ -293,19 +304,6 @@ addr_t vmap_page_range(struct pcb_t *caller,           // process call
   ret_rg->mode_bit = 1;
   ret_rg->rg_next = NULL;
   return 0;
-
-rollback:
-  while (mapped > 0)
-    pte_set_entry(mm, first_pgn + --mapped, 0, caller);
-
-  while (mm->fifo_pgn != old_fifo)
-  {
-    struct pgn_t *node = mm->fifo_pgn;
-    mm->fifo_pgn = node->pg_next;
-    free(node);
-  }
-
-  return (addr_t)-1;
 }
 
 /*

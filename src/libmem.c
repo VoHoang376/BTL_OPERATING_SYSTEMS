@@ -13,7 +13,8 @@
 #include "mm64.h"
 #include "syscall.h"
 #include "libmem.h"
-#include "dma.h"
+#include "sysbus.h"
+#include <errno.h>
 #include <inttypes.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -178,42 +179,38 @@ int __alloc(struct pcb_t *caller, int vmaid, int rgid, addr_t size, addr_t *allo
   return 0;
 }
 
-/*__free - remove a region memory
- *@caller: caller
- *@vmaid: ID vm area to alloc memory region
- *@rgid: memory region ID (used to identify variable in symbole table)
- *@size: allocated size
- *
- */
-int __free(struct pcb_t *caller, int vmaid, int rgid)
+/* Called with mmvm_lock held. */
+static int release_user_region(struct mm_struct *mm, int vmaid, int rgid)
 {
-  if (caller == NULL || vmaid < 0)
-    return -1;
-
-  int result = -1;
-  struct mm_struct *mm = caller->mm;
-  pthread_mutex_lock(&mmvm_lock);
-
   struct vm_rg_struct *rgnode = get_symrg_byid(mm, rgid);
   if (rgnode == NULL || rgnode->vmaid != vmaid || rgnode->mode_bit != 1 ||
       rgnode->rg_start >= rgnode->rg_end)
-    goto unlock;
+    return -1;
 
   struct vm_rg_struct *freerg_node = init_vm_rg(rgnode->rg_start, rgnode->rg_end);
   if (freerg_node == NULL)
-    goto unlock;
+    return -1;
 
   freerg_node->vmaid = vmaid;
   freerg_node->mode_bit = 1;
   if (enlist_vm_freerg_list(mm, freerg_node) != 0)
   {
     free(freerg_node);
-    goto unlock;
+    return -1;
   }
 
   *rgnode = (struct vm_rg_struct){0};
-  result = 0;
-unlock:
+  return 0;
+}
+
+int __free(struct pcb_t *caller, int vmaid, int rgid)
+{
+  if (caller == NULL || vmaid < 0)
+    return -1;
+
+  pthread_mutex_lock(&mmvm_lock);
+  int result = dma_regions_busy(caller->pid, rgid, rgid) ? -EAGAIN
+                                                      : release_user_region(caller->mm, vmaid, rgid);
   pthread_mutex_unlock(&mmvm_lock);
   return result;
 }
@@ -345,8 +342,9 @@ int pg_getval(struct mm_struct *mm, addr_t addr, BYTE *data, struct pcb_t *calle
   addr_t phyaddr = fpn * PAGING64_PAGESZ + off;
   struct sc_regs regs = {.a1 = SYSMEM_IO_READ, .a2 = phyaddr};
 
-  if (_syscall(caller->krnl, caller->pid, 17, &regs) != 0)
-    return -1;
+  int status = _syscall(caller->krnl, caller->pid, 17, &regs);
+  if (status != 0)
+    return status;
 
   *data = (BYTE)regs.a3;
   return 0;
@@ -542,7 +540,9 @@ int __sys_umem(struct pcb_t *caller, int memop, struct sc_regs *regs)
   pthread_mutex_lock(&kmm_lock);
   if (*find_used_frame(ram, caller->mm, fpn) != NULL)
   {
-    if (memop == SYSMEM_IO_WRITE)
+    if (dma_address_busy(caller->pid, addr, memop == SYSMEM_IO_WRITE))
+      result = -EAGAIN;
+    else if (memop == SYSMEM_IO_WRITE)
       result = MEMPHY_write(ram, addr, (BYTE)regs->a3);
     else
     {
@@ -600,35 +600,17 @@ static struct vm_rg_struct **find_kernel_gap(struct vm_area_struct *vma,
   return unused_pages;
 }
 
-/*kmalloc - alloc region memory in kmem
- *@caller: caller
- *@vmaid: ID vm area to alloc memory region
- *@rgid: memory region ID (used to identify variable in symbole table)
- *@size: memory size
- *@alloc_addr: allocated address
- */
-addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid,
-                 addr_t size, addr_t *alloc_addr)
+/* Called with mmvm_lock and kmm_lock held. */
+static addr_t alloc_kernel_region(struct pcb_t *caller, struct vm_area_struct *vma,
+                                  struct vm_rg_struct *entry, addr_t size, addr_t *alloc_addr)
 {
-  if (caller == NULL || caller->krnl == NULL || caller->krnl->mram == NULL ||
-      alloc_addr == NULL || size == 0)
-    return (addr_t)-1;
-
-  struct vm_rg_struct *entry = get_symrg_byid(caller->mm, rgid);
-  struct vm_area_struct *vma = get_vma_by_num(caller->krnl->mm, vmaid);
-  if (entry == NULL || vma == NULL)
-    return (addr_t)-1;
-
-  addr_t result = (addr_t)-1;
-  pthread_mutex_lock(&mmvm_lock);
-  pthread_mutex_lock(&kmm_lock);
   if (entry->rg_start != entry->rg_end)
-    goto unlock;
+    return (addr_t)-1;
 
   addr_t start;
   struct vm_rg_struct **link = find_kernel_gap(vma, size, &start);
   if (size > vma->vm_start + PAGING64_HEAP_VMA_SPAN - start)
-    goto unlock;
+    return (addr_t)-1;
 
   addr_t end = start + size;
   addr_t map_end = PAGING64_PAGE_ALIGNSZ(end);
@@ -642,7 +624,7 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid,
 
     if (vm_map_kernel(caller, vma->vm_start, map_end, start,
                       pages, &mapped) != 0)
-      goto unlock;
+      return (addr_t)-1;
 
     if (map_end > vma->vm_end)
       vma->vm_end = map_end;
@@ -654,13 +636,13 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid,
 
     if (!PAGING_PAGE_PRESENT(pte) || *frame == NULL ||
         size > PAGING64_PAGESZ - start % PAGING64_PAGESZ)
-      goto unlock;
+      return (addr_t)-1;
 
     ++(*frame)->kernel_users;
   }
 
   *entry = (struct vm_rg_struct){
-    .vmaid = vmaid,
+    .vmaid = vma->vm_id,
     .rg_start = start,
     .rg_end = end,
     .mode_bit = 0,
@@ -670,38 +652,28 @@ addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid,
   *link = entry;
   vma->sbrk = vma->vm_kernel_regions->rg_end;
   *alloc_addr = start;
-  result = 0;
+  return 0;
+}
 
-unlock:
+addr_t __kmalloc(struct pcb_t *caller, int vmaid, int rgid,
+                 addr_t size, addr_t *alloc_addr)
+{
+  if (caller == NULL || caller->krnl == NULL || caller->krnl->mram == NULL ||
+      alloc_addr == NULL || size == 0)
+    return (addr_t)-1;
+
+  struct vm_rg_struct *entry = get_symrg_byid(caller->mm, rgid);
+  struct vm_area_struct *vma = get_vma_by_num(caller->krnl->mm, vmaid);
+  if (entry == NULL || vma == NULL)
+    return (addr_t)-1;
+
+  pthread_mutex_lock(&mmvm_lock);
+  pthread_mutex_lock(&kmm_lock);
+  addr_t result = alloc_kernel_region(caller, vma, entry, size, alloc_addr);
   pthread_mutex_unlock(&kmm_lock);
   pthread_mutex_unlock(&mmvm_lock);
   return result;
 }
-
-/*libmem_dma_memcpy - DMA memcpy
- *@caller: caller
- *@src: source region
- *@dst: destination region
- *@offset: memory offset
- *@size: copied data size
- */
-int libmem_dma_memcpy(struct pcb_t *caller, uint32_t src, uint32_t dst, uint32_t offset, uint32_t size)
-{
-  /* TODO: provide DMA mempy */
-
-  //struct krnl_t *krnl = caller->krnl;
-
-  /*
-   *  TODO: provide asynchronous dma memcpy
-   *        handling the dma_done_callback
-   */
-  //do_dma(caller, (uint64_t) src, (uint64_t) dst, (uint64_t) size);
-  //krnl->...
-  //krnl->...
-
-  return 0;
-}
-
 
 static int libkmem_copy(struct pcb_t *caller, arg_t op, uint32_t source,
                         uint32_t destination, uint32_t offset, uint32_t size)
@@ -719,6 +691,12 @@ static int libkmem_copy(struct pcb_t *caller, arg_t op, uint32_t source,
   return _syscall(caller->krnl, caller->pid, 17, &regs);
 }
 
+int libmem_dma_memcpy(struct pcb_t *caller, uint32_t source, uint32_t destination,
+                      uint32_t offset, uint32_t size)
+{
+  return libkmem_copy(caller, SYSMEM_DMA_COPY, source, destination, offset, size);
+}
+
 int libkmem_copy_from_user(struct pcb_t *caller, uint32_t source,
                           uint32_t destination, uint32_t offset, uint32_t size)
 {
@@ -731,7 +709,15 @@ int libkmem_copy_to_user(struct pcb_t *caller, uint32_t source,
   return libkmem_copy(caller, SYSMEM_COPY_TO_USER, source, destination, offset, size);
 }
 
-/* The kernel copy path keeps both memory mutexes held during the transfer. */
+static int contains_range(const struct vm_rg_struct *rg, addr_t offset, addr_t size)
+{
+  if (rg == NULL || rg->rg_start >= rg->rg_end)
+    return 0;
+  addr_t length = rg->rg_end - rg->rg_start;
+  return offset <= length && size <= length - offset;
+}
+
+/* Called under mmvm_lock and kmm_lock. */
 static int get_copy_range(struct pcb_t *caller, int rgid, int vmaid,
                           unsigned long mode_bit, addr_t offset,
                           addr_t size, addr_t *physical)
@@ -744,12 +730,7 @@ static int get_copy_range(struct pcb_t *caller, int rgid, int vmaid,
     return -1;
 
   const struct vm_rg_struct *rg = get_symrg_byid(caller->mm, rgid);
-  if (rg == NULL || rg->rg_start >= rg->rg_end || rg->vmaid != vmaid ||
-      rg->mode_bit != mode_bit)
-    return -1;
-
-  addr_t length = rg->rg_end - rg->rg_start;
-  if (offset > length || size > length - offset)
+  if (!contains_range(rg, offset, size) || rg->vmaid != vmaid || rg->mode_bit != mode_bit)
     return -1;
 
   if (size == 0)
@@ -775,15 +756,53 @@ static int get_copy_range(struct pcb_t *caller, int rgid, int vmaid,
   return 0;
 }
 
-static int __kmem_copy(struct pcb_t *caller, int source, int destination,
-                       addr_t offset, addr_t size, int to_user)
+/* Each descriptor stays within one page at both ends. Publish the whole list
+ * only after every translation succeeded, so rejection cannot start a copy. */
+static int submit_dma_copy(struct pcb_t *caller, int source, int destination,
+                           addr_t offset, addr_t size)
 {
-  if (caller == NULL)
+  const struct vm_rg_struct *src = get_symrg_byid(caller->mm, source);
+  const struct vm_rg_struct *dst = get_symrg_byid(caller->mm, destination);
+  if (size == 0 || !contains_range(src, offset, size) || !contains_range(dst, offset, size))
     return -1;
 
-  int result = -1;
-  pthread_mutex_lock(&mmvm_lock);
-  pthread_mutex_lock(&kmm_lock);
+  /* At most one extra boundary per end for each page of data. */
+  size_t capacity = 2 * (size / PAGING64_PAGESZ + 1) + 1;
+  struct dma_segment *segments = calloc(capacity, sizeof(*segments));
+  if (segments == NULL)
+    return -1;
+
+  size_t count = 0;
+  for (addr_t done = 0; done < size; ++count)
+  {
+    addr_t pos = offset + done;
+    addr_t src_left = PAGING64_PAGESZ - (src->rg_start + pos) % PAGING64_PAGESZ;
+    addr_t dst_left = PAGING64_PAGESZ - (dst->rg_start + pos) % PAGING64_PAGESZ;
+    addr_t length = src_left < dst_left ? src_left : dst_left;
+    if (length > size - done)
+      length = size - done;
+
+    addr_t src_pa, dst_pa;
+    if (get_copy_range(caller, source, src->vmaid, src->mode_bit, pos, length, &src_pa) != 0 ||
+        get_copy_range(caller, destination, dst->vmaid, dst->mode_bit, pos, length, &dst_pa) != 0)
+    {
+      free(segments);
+      return -1;
+    }
+    segments[count] = (struct dma_segment){ src_pa, dst_pa, length };
+    done += length;
+  }
+  int result = dma_submit(caller->pid, source, destination, segments, count);
+
+  if (result != 0)
+    free(segments);
+  return result;
+}
+
+/* Called with mmvm_lock and kmm_lock held. */
+static int copy_region_data(struct pcb_t *caller, int source, int destination,
+                            addr_t offset, addr_t size, int to_user)
+{
   int user_rgid = to_user ? destination : source;
   const struct vm_rg_struct *user_rg = get_symrg_byid(caller->mm, user_rgid);
   int kernel_rgid = to_user ? source : destination;
@@ -792,12 +811,15 @@ static int __kmem_copy(struct pcb_t *caller, int source, int destination,
   if (user_rg == NULL || user_rg->vmaid < 0 ||
       get_copy_range(caller, user_rgid, user_rg->vmaid, 1, offset, size, NULL) != 0 ||
       get_copy_range(caller, kernel_rgid, 0, 0, offset, size, NULL) != 0)
-    goto unlock;
+    return -1;
+
+  if (dma_regions_busy(caller->pid, source, destination))
+    return -EAGAIN;
 
   int user_vmaid = user_rg->vmaid;
-  result = 0;
   for (addr_t i = 0; i < size; ++i)
   {
+    int result;
     BYTE data;
     addr_t pos = offset + i;
     if (to_user)
@@ -813,10 +835,20 @@ static int __kmem_copy(struct pcb_t *caller, int source, int destination,
         result = __write_kernel_mem(caller, 0, destination, pos, data);
     }
     if (result != 0)
-      break;
+      return result;
   }
+  return 0;
+}
 
-unlock:
+static int __kmem_copy(struct pcb_t *caller, int source, int destination,
+                       addr_t offset, addr_t size, int to_user)
+{
+  if (caller == NULL)
+    return -1;
+
+  pthread_mutex_lock(&mmvm_lock);
+  pthread_mutex_lock(&kmm_lock);
+  int result = copy_region_data(caller, source, destination, offset, size, to_user);
   pthread_mutex_unlock(&kmm_lock);
   pthread_mutex_unlock(&mmvm_lock);
   return result;
@@ -830,7 +862,8 @@ static int free_kernel_region_by_id(struct pcb_t *caller, int rgid)
   pthread_mutex_lock(&kmm_lock);
 
   struct vm_rg_struct *region = get_symrg_byid(caller->mm, rgid);
-  int status = release_kernel_region(caller, region);
+  int status = dma_regions_busy(caller->pid, rgid, rgid) ? -EAGAIN
+                                                      : release_kernel_region(caller, region);
   pthread_mutex_unlock(&kmm_lock);
   pthread_mutex_unlock(&mmvm_lock);
   return status;
@@ -851,6 +884,18 @@ int __sys_kmem(struct pcb_t *caller, struct sc_regs *regs)
       return -1;
     return free_kernel_region_by_id(caller, (int)regs->a2);
 
+  case SYSMEM_DMA_COPY:
+  {
+    if (!valid_register(caller, regs->a2) || !valid_register(caller, regs->a3) ||
+        regs->a4 > UINT32_MAX || regs->a5 > UINT32_MAX)
+      return -1;
+    pthread_mutex_lock(&mmvm_lock);
+    pthread_mutex_lock(&kmm_lock);
+    int status = submit_dma_copy(caller, (int)regs->a2, (int)regs->a3, regs->a4, regs->a5);
+    pthread_mutex_unlock(&kmm_lock);
+    pthread_mutex_unlock(&mmvm_lock);
+    return status;
+  }
   case SYSMEM_COPY_FROM_USER:
   case SYSMEM_COPY_TO_USER:
     if (!valid_register(caller, regs->a2) || !valid_register(caller, regs->a3))
@@ -1035,6 +1080,12 @@ int free_pcb_memph(struct pcb_t *caller)
   struct memphy_struct *ram = caller->krnl != NULL ? caller->krnl->mram : NULL;
   pthread_mutex_lock(&mmvm_lock);
   pthread_mutex_lock(&kmm_lock);
+  if (dma_regions_busy(caller->pid, -1, -1))
+  {
+    pthread_mutex_unlock(&kmm_lock);
+    pthread_mutex_unlock(&mmvm_lock);
+    return -EAGAIN;
+  }
   if (release_kernel_regions(caller) != 0)
   {
     pthread_mutex_unlock(&kmm_lock);

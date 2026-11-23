@@ -13,6 +13,7 @@
 #include "mm.h"
 #include "syscall.h"
 #include "libmem.h"
+#include <errno.h>
 
 int calc(struct pcb_t *proc)
 {
@@ -38,7 +39,8 @@ int free_data(struct pcb_t *proc, uint32_t reg_index)
 	return free_mem(proc->regs[reg_index], proc);
 }
 
-int read(
+#ifndef MM_PAGING
+static int read_data(
 	struct pcb_t *proc, // Process executing the instruction
 	uint32_t source,	// Index of source register
 	uint32_t offset,	// Source address = [source] + [offset]
@@ -57,7 +59,7 @@ int read(
 	}
 }
 
-int write(
+static int write_data(
 	struct pcb_t *proc,	// Process executing the instruction
 	BYTE data,		// Data to be wrttien into memory
 	uint32_t destination, // Index of destination register
@@ -67,12 +69,15 @@ int write(
 	return write_mem(proc->regs[destination] + offset, proc, data);
 }
 
+#endif
+
 int run(struct pcb_t *proc)
 {
 	if (proc->pc >= proc->code->size)
 		return 1;
 
 	struct inst_t ins = proc->code->text[proc->pc];
+	const unsigned int nregs = sizeof(proc->regs) / sizeof(proc->regs[0]);
 	proc->pc++;
 	int stat = 1;
 
@@ -83,6 +88,8 @@ int run(struct pcb_t *proc)
 		break;
 
 	case ALLOC:
+		if (ins.arg_1 >= nregs)
+			return -1;
 #ifdef MM_PAGING
 		stat = liballoc(proc, ins.arg_0, ins.arg_1);
 #else
@@ -92,32 +99,30 @@ int run(struct pcb_t *proc)
 
 #ifdef MM_PAGING
 	case KMALLOC:
-		if (ins.arg_0 <= UINT32_MAX && ins.arg_1 < sizeof(proc->regs) / sizeof(proc->regs[0]))
+		if (ins.arg_0 <= UINT32_MAX && ins.arg_1 < nregs)
 			stat = libkmem_malloc(proc, ins.arg_0, ins.arg_1);
 		else
 			stat = -1;
 		break;
 
+	case DMA_MEMCPY:
 	case COPY_FROM_USER:
 	case COPY_TO_USER:
-	{
-		const unsigned int nregs = sizeof(proc->regs) / sizeof(proc->regs[0]);
 		if (ins.arg_0 >= nregs || ins.arg_1 >= nregs ||
 		    ins.arg_2 > UINT32_MAX || ins.arg_3 > UINT32_MAX)
 			stat = -1;
+		else if (ins.opcode == DMA_MEMCPY)
+			stat = libmem_dma_memcpy(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
 		else if (ins.opcode == COPY_FROM_USER)
 			stat = libkmem_copy_from_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
 		else
 			stat = libkmem_copy_to_user(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
 		break;
-	}
-
-	case DMA_MEMCPY:
-		stat = libmem_dma_memcpy(proc, ins.arg_0, ins.arg_1, ins.arg_2, ins.arg_3);
-		break;
 #endif
 
 	case FREE:
+		if (ins.arg_0 >= nregs)
+			return -1;
 #ifdef MM_PAGING
 		stat = libfree(proc, ins.arg_0);
 #else
@@ -128,7 +133,6 @@ int run(struct pcb_t *proc)
 	case READ:
 #ifdef MM_PAGING
 	{
-		const unsigned int nregs = sizeof(proc->regs) / sizeof(proc->regs[0]);
 		uint32_t data;
 
 		if (ins.arg_0 >= nregs || ins.arg_2 >= nregs)
@@ -142,18 +146,18 @@ int run(struct pcb_t *proc)
 			proc->regs[ins.arg_2] = data;
 	}
 #else
-		stat = read(proc, ins.arg_0, ins.arg_1, ins.arg_2);
+		stat = read_data(proc, ins.arg_0, ins.arg_1, ins.arg_2);
 #endif
 		break;
 
 	case WRITE:
 #ifdef MM_PAGING
-		if (ins.arg_1 < sizeof(proc->regs) / sizeof(proc->regs[0]))
+		if (ins.arg_1 < nregs)
 			stat = libwrite(proc, (BYTE)ins.arg_0, ins.arg_1, ins.arg_2);
 		else
 			stat = -1;
 #else
-		stat = write(proc, ins.arg_0, ins.arg_1, ins.arg_2);
+		stat = write_data(proc, ins.arg_0, ins.arg_1, ins.arg_2);
 #endif
 		break;
 
@@ -165,5 +169,7 @@ int run(struct pcb_t *proc)
 		stat = 1;
 	}
 
+	if (stat == -EAGAIN)
+		proc->pc--;  /* The scheduler can run another process before retrying. */
 	return stat;
 }
