@@ -423,23 +423,28 @@ int dpi_bank_read32_legacy(long long offset) {
     size_t bytes = transfer.len ? beat_size(offset, transfer.src) : 4;
     if (!bytes)
         bytes = beat_size(offset, transfer.dst);  /* RTL reads back its write */
-    void *src = memory_bus_ptr(offset, bytes);
-    if (src && bytes)
-        memcpy(&word, src, bytes);
-    else
+    uint8_t *src = (uint8_t *)memory_bus_ptr(offset, bytes);
+    if (src && bytes) {
+        /* Process byte-by-byte to avoid endianness dependency (ABI advice). */
+        for (size_t i = 0; i < bytes; i++)
+            word |= (uint32_t)src[i] << (8 * i);
+    } else {
         bus_error = 1;
+    }
     return (int)word;
 }
 
 int dpi_bank_write32_legacy(long long offset, int value) {
     size_t bytes = transfer.len ? beat_size(offset, transfer.dst) : 4;
-    void *dst = memory_bus_ptr(offset, bytes);
+    uint8_t *dst = (uint8_t *)memory_bus_ptr(offset, bytes);
     if (!dst || !bytes) {
         bus_error = 1;
         return -1;
     }
-    /* The last bus beat may have only 1..3 valid bytes. */
-    memcpy(dst, &value, bytes);
+    /* Process byte-by-byte to avoid endianness dependency (ABI advice).
+     * The last bus beat may have only 1..3 valid bytes. */
+    for (size_t i = 0; i < bytes; i++)
+        dst[i] = (uint8_t)((uint32_t)value >> (8 * i));
     return 0;
 }
 
