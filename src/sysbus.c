@@ -83,24 +83,29 @@ static atomic_int irq_cpu = -1;
 static atomic_uint irq_pid;
 static sem_t irq_ack;
 
-static void put_num(char *b, int *n, unsigned long v) {
-    char t[24]; int k = 0;
-    if (v == 0) t[k++] = '0';
-    while (v) { t[k++] = (char)('0' + v % 10); v /= 10; }
-    while (k) b[(*n)++] = t[--k];
-}
+/* CPU whose handler really ran. The handler only records it (async-signal-safe);
+ * the co-processor prints the "[IRQ]" line in normal context after the ack, so
+ * the log keeps its order even when stdout is redirected to a file. */
+static atomic_int irq_ran_cpu = -1;
 
-static void dma_isr_body(int cpu, uint32_t pid, int err) {
-    char b[96]; int n = 0;
-    const char *s = "[IRQ] DMA done -> handler on CPU ";
-    while (*s) b[n++] = *s++;
-    put_num(b, &n, (unsigned long)cpu);
-    s = " for pid ";
-    while (*s) b[n++] = *s++;
-    put_num(b, &n, pid);
-    if (err) { s = " (ERROR)"; while (*s) b[n++] = *s++; }
-    b[n++] = '\n';
-    if (write(1, b, (size_t)n) < 0) { /* nothing safe to do */ }
+/* Result of finished DMA requests, per process. The interrupt handler (running on
+ * the CPU that issued the command) adds 1 when a transfer FAILED; the CPU loop
+ * reads it with dma_take_error() before the next instruction of that process.
+ *
+ * One private counter per process: the table is indexed DIRECTLY by pid, with no
+ * modulo, so two processes can never share a counter. PIDs are unique, start at 1,
+ * are never reused and the loader creates at most num_processes of them, so the
+ * table (sized in dma_irq_install) is large enough. A pid outside the table is
+ * refused by dma_submit() instead of being mapped onto somebody else's slot.
+ * The table is allocated before any thread starts and never resized, so the
+ * handler can use it without locks. */
+static atomic_uint *dma_pid_error;
+static uint32_t dma_max_pid;
+
+int dma_take_error(uint32_t pid) {
+    if (!dma_pid_error || pid == 0 || pid > dma_max_pid)
+        return 0;
+    return (int)atomic_exchange(&dma_pid_error[pid], 0);
 }
 
 static void dma_irq_handler(int sig, siginfo_t *si, void *uc) {
@@ -109,7 +114,10 @@ static void dma_irq_handler(int sig, siginfo_t *si, void *uc) {
     int cpu = tls_cpu;
     if (si->si_code == SI_QUEUE && cpu >= 0 &&
         atomic_compare_exchange_strong(&irq_cpu, &cpu, -1)) {
-        dma_isr_body(cpu, atomic_load(&irq_pid), si->si_value.sival_int);
+        atomic_store(&irq_ran_cpu, cpu);
+        uint32_t pid = atomic_load(&irq_pid);
+        if (si->si_value.sival_int && pid >= 1 && pid <= dma_max_pid)
+            atomic_fetch_add(&dma_pid_error[pid], 1);   /* tell the process */
         sem_post(&irq_ack);
     }
     errno = saved_errno;
@@ -122,13 +130,22 @@ static int set_irq_mask(int how) {
     return pthread_sigmask(how, &set, NULL);
 }
 
-int dma_irq_install(void) {
+int dma_irq_install(unsigned max_pid) {
     struct sigaction sa = {0};
     sa.sa_sigaction = dma_irq_handler;
     sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&sa.sa_mask);
-    if (sem_init(&irq_ack, 0, 0) != 0)
+    if (max_pid == 0)
         return -1;
+    dma_pid_error = calloc((size_t)max_pid + 1, sizeof(*dma_pid_error));
+    if (!dma_pid_error)
+        return -1;
+    dma_max_pid = max_pid;
+    if (sem_init(&irq_ack, 0, 0) != 0) {
+        free(dma_pid_error);
+        dma_pid_error = NULL;
+        return -1;
+    }
     if (set_irq_mask(SIG_BLOCK) != 0 || sigaction(DMA_IRQ_SIGNAL, &sa, NULL) != 0) {
         dma_irq_cleanup();
         return -1;
@@ -160,6 +177,9 @@ void dma_unregister_cpu(void) {
 
 void dma_irq_cleanup(void) {
     sem_destroy(&irq_ack);
+    free(dma_pid_error);
+    dma_pid_error = NULL;
+    dma_max_pid = 0;
 }
 
 static int dma_raise_irq(const struct dma_req *r, int error) {
@@ -177,8 +197,8 @@ static int dma_raise_irq(const struct dma_req *r, int error) {
 
 int dma_submit(uint32_t pid, int source, int destination,
                struct dma_segment *segments, size_t count) {
-    if (!count || !segments || tls_cpu < 0)
-        return -1;
+    if (!count || !segments || tls_cpu < 0 || pid == 0 || pid > dma_max_pid)
+        return -1;      /* unknown pid: refuse, never share an error counter */
     struct dma_req *r = malloc(sizeof(*r));
     if (!r)
         return -1;
@@ -262,6 +282,8 @@ int dma_worker_loop(void) {
             fputs("Cannot deliver DMA interrupt to its CPU\n", stderr);
             exit(EXIT_FAILURE);
         }
+        printf("[IRQ] DMA done -> handler on CPU %d for pid %u%s\n",
+               atomic_load(&irq_ran_cpu), r->pid, status ? " (ERROR)" : "");
         printf("[DMA] CPU %d acknowledged PID %u (%zu segments, %s)\n",
                r->cpu, r->pid, r->count, status ? "error" : "ok");
         if (status) ++failed;

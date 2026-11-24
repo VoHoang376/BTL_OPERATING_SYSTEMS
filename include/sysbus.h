@@ -61,7 +61,7 @@ int dma_bus_end(void);
 
 /* Install SIGRTMIN in main before starting threads. Only simulated CPUs
  * enable it; the worker directs each completion to the CPU that submitted it. */
-int dma_irq_install(void);
+int dma_irq_install(unsigned max_pid);   /* max_pid = number of processes (PIDs 1..max_pid) */
 int dma_register_cpu(int cpu_id);
 void dma_unregister_cpu(void);
 void dma_irq_cleanup(void);
@@ -70,6 +70,9 @@ int dma_submit(uint32_t pid, int source, int destination,
                struct dma_segment *segments, size_t count);
 int dma_regions_busy(uint32_t pid, int first, int second); /* first < 0: any region */
 int dma_address_busy(uint32_t pid, uint64_t address, int writing);
+/* Interrupt handler -> process: number of DMA transfers of this process that
+ * failed since the last call (the counter is cleared). 0 = all good. */
+int dma_take_error(uint32_t pid);
 int dma_worker_loop(void);
 void dma_queue_shutdown(void);
 

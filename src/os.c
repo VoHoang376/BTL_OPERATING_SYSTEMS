@@ -87,6 +87,10 @@ static void * cpu_routine(void * args) {
 			next_slot(timer_id);
 			continue;
 		}else if (proc->pc == proc->code->size) {
+			/* An interrupt may have reported a failed DMA after the last instruction */
+			if (dma_take_error(proc->pid))
+				printf("\tCPU %d: Process %2d finished but its DMA transfer FAILED "
+					"(destination is incomplete)\n", id, proc->pid);
 			printf("\tCPU %d: Processed %2d has finished\n",
 				id ,proc->pid);
 			remove_running_proc(proc);
@@ -130,11 +134,34 @@ static void * cpu_routine(void * args) {
 			time_left = time_slot;
 		}
 		
-		/* Run current process */
-		if (run(proc) == -EAGAIN)
+		/* The DMA interrupt handler (on this CPU) recorded a failed transfer for
+		 * this process: do not let it go on using data that was never copied. */
+		if (dma_take_error(proc->pid)) {
+			printf("\tCPU %d: Process %2d: DMA transfer FAILED (interrupt reported an error), "
+				"process aborted at pc=%u\n", id, proc->pid, proc->pc);
+			proc->pc = proc->code->size;
 			time_left = 0;
-		else
+			next_slot(timer_id);
+			continue;
+		}
+
+		/* Run current process */
+		uint32_t pc_before = proc->pc;
+		int op = pc_before < proc->code->size ? (int)proc->code->text[pc_before].opcode : -1;
+		int status = run(proc);
+		if (status == -EAGAIN) {
+			time_left = 0;
+		} else {
 			time_left--;
+			if (op == DMA_MEMCPY && status != 0) {
+				/* The command was refused (bad region, size, page not present...):
+				 * nothing was copied, so the process must not continue. */
+				printf("\tCPU %d: Process %2d: DMA command at pc=%u REJECTED, "
+					"process aborted\n", id, proc->pid, pc_before);
+				proc->pc = proc->code->size;
+				time_left = 0;
+			}
+		}
 		next_slot(timer_id);
 	}
 	detach_event(timer_id);
@@ -340,7 +367,7 @@ int main(int argc, char * argv[]) {
 #endif
 
 	/* Install the IRQ before the timer, loader or CPUs inherit their signal mask. */
-	if (dma_irq_install() != 0 || pthread_create(&dma, NULL, co_processor, NULL) != 0) {
+	if (dma_irq_install((unsigned)num_processes) != 0 || pthread_create(&dma, NULL, co_processor, NULL) != 0) {
 		fputs("Cannot start DMA co-processor\n", stderr);
 		return EXIT_FAILURE;
 	}
