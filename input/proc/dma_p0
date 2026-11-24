@@ -1,0 +1,11 @@
+0 10
+alloc 256 0
+alloc 256 1
+write 65 0 0
+write 66 0 1
+dma_memcpy 0 1 0 64
+calc
+calc
+calc
+read 1 0 2
+read 1 1 3
